@@ -96,7 +96,7 @@ class BertClassifier():
         self.device = torch.device('cuda:' + device_num)
         self.model = BertModelforClassification.from_pretrained('bert-base-uncased', num_labels=len(heads))
 
-    def train(self, X, Y):
+    def train(self, X, Y, val_X, val_Y):
         all_input_ids = torch.tensor(X)
         all_Ys = get_binary_vec(Y, len(self.heads))
         all_Ys = torch.tensor(all_Ys)
@@ -140,7 +140,7 @@ class BertClassifier():
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
-                if step % 10000 == 0:
+                if step % self.hypes.log_interval == 0:
                     for i in range(len(c_pred)):
                         eval_t += 1
                         truth = labels.cpu().detach().numpy().astype(int)[i]
@@ -155,8 +155,16 @@ class BertClassifier():
                     print('Precision:', np.round(precisions/eval_t, 4))
                     print('Recall:', np.round(recalls/eval_t, 4))
 
-            output_dir = '../save_models/head_classifier/'+self.hypes.dataset+'/t-'+str(self.t)+'_ep-'+str(epoch+1)+'/'
-            self.save(output_dir)
+            if epoch % 10 == 0:
+                output_dir = '../save_models/head_classifier/'+self.hypes.dataset+'/t-'+str(self.t)+'_ep-'+str(epoch+1)+'/'
+                self.save(output_dir)
+
+            eval_idx = np.random.choice(range(0, len(val_X)), int(len(val_X)/10))
+            val_inputs = val_X[eval_idx]
+            val_labels = val_Y[eval_idx]
+            acc = self.evaluate(val_inputs, val_labels)
+            self.model.train()
+
 
     def evaluate(self, X, Y, model_path=''):
         if model_path:
@@ -210,7 +218,7 @@ class BertClassifier():
 
         p5 = precisions/nb_tr_steps
         r5 = recalls/nb_tr_steps
-        print("Precision@5: {:.4f} | Recall@5: {:.4f}".format(p5, r5))
+        print("Test Precision@5: {:.4f} | Recall@5: {:.4f}".format(p5, r5))
         return p5, r5
 
     def get_bert_token(self, trn_text, only_CLS=False):
@@ -276,8 +284,12 @@ def main():
     parser.add_argument("-gpu", "--device_num", default='0', type=str)
     parser.add_argument("-train", "--is_train", default=1, type=int)
     parser.add_argument("-ep", "--epochs", default=8, type=int)
+    parser.add_argument("-ft", "--fine_tune", default=0, type=int)
+    parser.add_argument("-from", "--ft_from", default=0, type=int)
     args = parser.parse_args()
-
+    
+    ft = (args.fine_tune == 1)
+    ft_from = args.ft_from
     hypes = Hyperparameters(args.dataset)
     ds_path = '../datasets/' + args.dataset
     device_num = args.device_num
@@ -306,7 +318,7 @@ def main():
         bert.train(trn_X, trn_head_Y)
         # bert.save()
     else:
-        model_path = '../save_models/head_classifier/'+args.dataset+'/t-'+str(head_threshold)+'/pytorch_model.bin'
+        model_path = '../save_models/head_classifier/'+args.dataset+'/t-'+str(head_threshold)+'_ep-'+str(ft_from)+'/pytorch_model.bin'
         print('======================Start Testing======================')
         accs =  bert.evaluate(test_X, test_head_Y, model_path)
 

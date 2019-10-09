@@ -47,6 +47,8 @@ def main():
         with open(ds_path+'/mlc2seq/train_tails_Y-'+str(threshold), 'wb') as g:
             pkl.dump(tail_Y, g)
     else:
+        with open(ds_path+'/mlc2seq/train_tails_Y-'+str(threshold), 'rb') as g:
+            trn_tail_Y = set(pkl.load(g))
         test_labels, test_corpus = parse_mlc2seq_format(ds_path + '/mlc2seq/test.txt')
         for idx, labels in tqdm(enumerate(test_labels)):
             labels = np.array(list(map(int, labels.split(','))))

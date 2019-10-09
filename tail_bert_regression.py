@@ -248,7 +248,7 @@ class BertRegressor():
                 loss.backward()
                 optimizer.step()
 
-                if step % 2000 == 0:
+                if step % self.hypes.log_interval == 0:
                     logits = c_pred.cpu().detach().numpy()
                     eval_t += bs
                     distances, preds = nbrs.kneighbors(logits)
@@ -279,7 +279,7 @@ class BertRegressor():
             # output_dir = '../save_models/tail_regressor/'+self.hypes.dataset+'/t-'+str(self.t)+'_ep-' + str(epoch)+'-'+self.emb_type+'/'
             # self.save(output_dir)
 
-    def evaluate(self, X, Y, Y_nums, label_space, model_path = ''):
+    def evaluate(self, X, Y, Y_nums, label_space, model_path = '', ft_from=0):
         if model_path:
             self.model.load_state_dict(torch.load(model_path))
         nbrs = NN(n_neighbors=5, algorithm='auto').fit(label_space)
@@ -305,7 +305,7 @@ class BertRegressor():
 
         print(logits.shape)
         # print('Calculating Acccuracy...')
-        preds_path = self.ds_path + '/knn_preds'
+        preds_path = self.ds_path + '/knn_preds-ep-' + str(ft_from)
         if not os.path.exists(preds_path):
             _, preds = nbrs.kneighbors(logits)
             with open(preds_path, 'wb') as f:
@@ -496,14 +496,14 @@ def main():
     else:
         model_path = '../save_models/tail_regressor/' + hypes.dataset + '/t-' +str(tail_threshold)+'_ep-' + str(ft_from)+'-'+label_embs+'/pytorch_model.bin'
         print('======================Start Testing======================')
-        # accs =  bertReg.evaluate(test_X, test_Y, test_Y_nums, label_space, model_path)
+        accs =  bertReg.evaluate(test_X, test_Y, test_Y_nums, label_space, model_path, ft_from)
 
-        # predict head labels with predicted tail labels and evaluate
-        head_space = smat.load_npz(ds_path+'/L.elmo.npz')
-        head_space[tails[0]:] = 9999
-        bertReg.predict_heads_by_graph(test_X, test_head_Y, label_graph, heads, label_space, head_space, model_path)
+        ## predict head labels with predicted tail labels and evaluate
+        # head_space = smat.load_npz(ds_path+'/L.elmo.npz')
+        # head_space[tails[0]:] = 9999
+        # bertReg.predict_heads_by_graph(test_X, test_head_Y, label_graph, heads, label_space, head_space, model_path)
 
-        # test with training data
+        ## test with training data
         # accs =  bertReg.evaluate(trn_X, trn_Y, trn_Y_nums, label_space, model_path)
 
 

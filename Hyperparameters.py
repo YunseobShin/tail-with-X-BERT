@@ -13,19 +13,19 @@ class Hyperparameters():
         elif dataset == 'Wiki10-31K':
             self.dataset = 'Wiki10-31K'
             self.depth = 9
-            self.train_batch_size=6
+            self.train_batch_size=12
             self.eval_batch_size=16
-            self.log_interval=50
+            self.log_interval=400
             self.eval_interval=150
             self.learning_rate=5e-5
             self.warmup_rate=0.1
-            self.max_seq_len = 512
+            # self.max_seq_len = 512
         elif dataset == 'AmazonCat-13K':
             self.dataset = 'AmazonCat-13K'
             self.depth=8
             self.train_batch_size=12
             self.eval_batch_size=48
-            self.log_interval=50
+            self.log_interval=4000
             self.eval_interval=100
             self.learning_rate=5e-5
             self.warmup_rate=0.1
