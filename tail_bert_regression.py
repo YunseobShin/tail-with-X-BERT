@@ -493,6 +493,7 @@ def main():
             bertReg.train(trn_X, trn_Y, trn_Y_nums, label_space, test_X, test_Y, test_Y_nums)
         output_dir = '../save_models/tail_regressor/'+hypes.dataset+'/t-'+str(tail_threshold)+'_ep-' + str(epochs + ft_from) +'-'+ label_embs+'/'
         bertReg.save(output_dir)
+        accs =  bertReg.evaluate(test_X, test_Y, test_Y_nums, label_space)
     else:
         model_path = '../save_models/tail_regressor/' + hypes.dataset + '/t-' +str(tail_threshold)+'_ep-' + str(ft_from)+'-'+label_embs+'/pytorch_model.bin'
         print('======================Start Testing======================')

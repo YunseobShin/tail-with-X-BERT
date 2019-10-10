@@ -24,39 +24,27 @@ import xbert.rf_util as rf_util
 from Hyperparameters import Hyperparameters
 
 class BertModelforClassification(BertModel):
-    def __init__(self, config, num_labels):
+    def __init__(self, config, num_labels, ft):
         super(BertModelforClassification, self).__init__(config)
         self.bert = BertModel.from_pretrained('bert-base-uncased')
         self.dropout = nn.Dropout(0.5)
         # self.FCN1 = nn.Linear(768, 512)
         self.FCN1 = nn.Linear(768, num_labels)
         self.softmax = nn.Softmax()
+        self.ft = ft
         self.apply(self.init_bert_weights)
 
     def forward(self, input_ids, token_type_ids=None, attention_mask=None):
-        _, pooled_output = self.bert(input_ids, output_all_encoded_layers=False)
+        if self.ft:
+            with torch.no_grad():
+                _, pooled_output = self.bert(input_ids, output_all_encoded_layers=False)
+        else:
+            _, pooled_output = self.bert(input_ids, output_all_encoded_layers=False)
+
         pooled_output = self.dropout(pooled_output)
         logits = self.FCN1(pooled_output)
         return self.softmax(logits)
 
-class HingeLoss(nn.Module):
-    """criterion for loss function
-
-       y: 0/1 ground truth matrix of size: batch_size x output_size
-       f: real number pred matrix of size: batch_size x output_size
-    """
-    def __init__(self, margin=1.0, squared=True):
-        super(HingeLoss, self).__init__()
-        self.margin = margin
-        self.squared = squared
-
-    def forward(self, f, y):
-        # convert y into {-1,1}
-        y_new = 2.*y - 1.0
-        loss = F.relu(self.margin - y_new*f)
-        if self.squared:
-            loss = loss**2
-        return loss.mean()
 
 def get_binary_vec(label_list, output_dim):
     res = np.zeros([len(label_list), output_dim])
@@ -84,7 +72,7 @@ def get_score(logits, truth, k=5):
 
 
 class BertClassifier():
-    def __init__(self, hypes, heads, t, device_num, epochs, max_seq_len=512):
+    def __init__(self, hypes, heads, t, device_num, ft, epochs, max_seq_len=512):
         self.max_seq_len = max_seq_len
         self.ds_path = '../datasets/' + hypes.dataset
         self.hypes = hypes
@@ -94,9 +82,15 @@ class BertClassifier():
         self.tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
         self.criterion =  nn.BCELoss()
         self.device = torch.device('cuda:' + device_num)
-        self.model = BertModelforClassification.from_pretrained('bert-base-uncased', num_labels=len(heads))
+        self.model = BertModelforClassification.from_pretrained('bert-base-uncased', num_labels=len(heads), ft)
 
-    def train(self, X, Y, val_X, val_Y):
+    def train(self, X, Y, val_X, val_Y, model_path=None, ft_from=0):
+        if model_path: # fine tuning
+            self.model.load_state_dict(torch.load(model_path))
+            epohcs_range = range(ft_from+1, ft_from+self.epochs+1)
+        else:
+            epohcs_range = range(1, self.epochs+1)
+
         all_input_ids = torch.tensor(X)
         all_Ys = get_binary_vec(Y, len(self.heads))
         all_Ys = torch.tensor(all_Ys)
@@ -116,7 +110,7 @@ class BertClassifier():
                              lr=self.hypes.learning_rate,
                              warmup=self.hypes.warmup_rate)
 
-        for epoch in trange(self.epochs):
+        for epoch in tqdm(epohcs_range):
             eval_t = 0
             tr_loss = 0
             nb_tr_examples, nb_tr_steps = 0, 0
@@ -156,12 +150,12 @@ class BertClassifier():
                     print('Recall:', np.round(recalls/eval_t, 4))
 
             if epoch % 10 == 0:
-                output_dir = '../save_models/head_classifier/'+self.hypes.dataset+'/t-'+str(self.t)+'_ep-'+str(epoch+1)+'/'
+                output_dir = '../save_models/head_classifier/'+self.hypes.dataset+'/t-'+str(self.t)+'_ep-'+str(epoch)+'/'
                 self.save(output_dir)
 
             eval_idx = np.random.choice(range(0, len(val_X)), int(len(val_X)/10))
-            val_inputs = val_X[eval_idx]
-            val_labels = val_Y[eval_idx]
+            val_inputs = np.array(val_X)[eval_idx]
+            val_labels = np.array(val_Y)[eval_idx]
             acc = self.evaluate(val_inputs, val_labels)
             self.model.train()
 
@@ -171,55 +165,33 @@ class BertClassifier():
             self.model.load_state_dict(torch.load(model_path))
         all_input_ids = torch.tensor(X)
         all_Ys = get_binary_vec(Y, len(self.heads))
-        all_Ys = torch.tensor(all_Ys)
         bs = self.hypes.eval_batch_size
-        eval_data = TensorDataset(all_input_ids, all_Ys)
-        eval_sampler = RandomSampler(eval_data)
-        eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=bs)
         self.model.eval()
         self.model.to(self.device)
 
-        tr_loss = 0
-        nb_tr_examples, nb_tr_steps = 0, 0
-
         num_corrects = 0
-        total = 0
-        total_run_time = 0
-
-        # for step, batch in enumerate(train_dataloader):
         start_time = time.time()
-        precisions = recalls = 0
-        for step in range(int(len(X)/bs)-1):
+        precisions = np.zeros(5)
+        recalls = np.zeros(5)
+        eval_t=0
+        print('Inferencing...')
+        for step in trange(int(len(X)/bs)-1):
             input_ids = all_input_ids[step*bs:(step+1)*bs].to(self.device)
-            labels = all_Ys[step*bs:(step+1)*bs].to(self.device).float()
+            labels = all_Ys[step*bs:(step+1)*bs]
 
             with torch.no_grad():
                 c_pred = self.model(input_ids)
-                loss = self.criterion(c_pred, labels)
 
-            tr_loss += loss.item()
-            nb_tr_examples += input_ids.size(0)
-            nb_tr_steps += 1
-            total_run_time += time.time() - start_time
             for i in range(len(c_pred)):
-                truth = labels.cpu().detach().numpy().astype(int)[i]
+                eval_t += 1
+                truth = labels[i]
                 logit = c_pred[i]
                 precision, recall = get_score(logit, truth)
                 precisions += precision
                 recalls += recall
 
-            if step % 100 == 0:
-                elapsed = time.time() - start_time
-                start_time = time.time()
-                cur_loss = tr_loss / nb_tr_steps
-                print("| {:4d}/{:4d} batches | ms/batch {:5.2f} | precision {:.4f} | recall: {:.4f}".format(
-                    step, len(eval_dataloader), elapsed * 1000, precisions/nb_tr_examples, recalls/nb_tr_examples))
-
-
-        p5 = precisions/nb_tr_steps
-        r5 = recalls/nb_tr_steps
-        print("Test Precision@5: {:.4f} | Recall@5: {:.4f}".format(p5, r5))
-        return p5, r5
+        print('Test Precision:', np.round(precisions/eval_t, 4))
+        print('Test Recall:', np.round(recalls/eval_t, 4))
 
     def get_bert_token(self, trn_text, only_CLS=False):
         X = []
@@ -287,7 +259,7 @@ def main():
     parser.add_argument("-ft", "--fine_tune", default=0, type=int)
     parser.add_argument("-from", "--ft_from", default=0, type=int)
     args = parser.parse_args()
-    
+
     ft = (args.fine_tune == 1)
     ft_from = args.ft_from
     hypes = Hyperparameters(args.dataset)
@@ -314,13 +286,18 @@ def main():
     print('Number of labels:', len(heads))
     print('Number of trn instances:', len(trn_X))
     if args.is_train:
-        print('======================Start Training======================')
-        bert.train(trn_X, trn_head_Y)
-        # bert.save()
+        if ft:
+            print('======================Start Fine-Tuning======================')
+            model_path = '../save_models/head_classifier/'+hypes.dataset+'/t-'+str(head_threshold)+'_ep-' + str(ft_from)+'/pytorch_model.bin'
+            bert.train(trn_X, trn_head_Y, test_X, test_head_Y, model_path, ft_from)
+        else:
+            print('======================Start Training======================')
+            bert.train(trn_X, trn_head_Y, test_X, test_head_Y)
+            # bert.save()
     else:
         model_path = '../save_models/head_classifier/'+args.dataset+'/t-'+str(head_threshold)+'_ep-'+str(ft_from)+'/pytorch_model.bin'
         print('======================Start Testing======================')
-        accs =  bert.evaluate(test_X, test_head_Y, model_path)
+        bert.evaluate(test_X, test_head_Y, model_path)
 
 
 
