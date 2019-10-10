@@ -278,7 +278,7 @@ def main():
     with open(ds_path+'/mlc2seq/heads-'+str(head_threshold), 'rb') as g:
         heads = pkl.load(g)
     output_dim = len(heads)
-    bert = BertClassifier(hypes, heads, head_threshold, device_num, args.epochs, max_seq_len=256)
+    bert = BertClassifier(hypes, heads, head_threshold, device_num, ft, args.epochs, max_seq_len=256)
     trn_X_path = ds_path+'/head_data/trn_X-' + str(head_threshold)
     test_X_path = ds_path+'/head_data/test_X-' + str(head_threshold)
     trn_X = load_data(trn_X_path, trn_head_X, bert)
