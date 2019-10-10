@@ -24,7 +24,7 @@ import xbert.rf_util as rf_util
 from Hyperparameters import Hyperparameters
 
 class BertModelforClassification(BertModel):
-    def __init__(self, config, num_labels, ft):
+    def __init__(self, config, ft, num_labels):
         super(BertModelforClassification, self).__init__(config)
         self.bert = BertModel.from_pretrained('bert-base-uncased')
         self.dropout = nn.Dropout(0.5)
@@ -82,7 +82,7 @@ class BertClassifier():
         self.tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
         self.criterion =  nn.BCELoss()
         self.device = torch.device('cuda:' + device_num)
-        self.model = BertModelforClassification.from_pretrained('bert-base-uncased', num_labels=len(heads), ft)
+        self.model = BertModelforClassification.from_pretrained('bert-base-uncased', ft, num_labels=len(heads))
 
     def train(self, X, Y, val_X, val_Y, model_path=None, ft_from=0):
         if model_path: # fine tuning
