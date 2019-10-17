@@ -229,11 +229,6 @@ class BertRegressor():
                 input_ids, label_embs, label_nums = batch
                 input_ids = input_ids.to(self.device)
                 label_embs = label_embs.to(self.device).float()
-            # for step in range(int(len(X)/bs)-1):
-            #     input_ids = all_input_ids[step*bs:(step+1)*bs].to(self.device)
-            #     label_embs = all_label_emb[step*bs:(step+1)*bs].to(self.device).float()
-            #     label_nums = all_Y_nums[step*bs:(step+1)*bs]
-
                 c_pred = self.model(input_ids)
                 loss = self.criterion(c_pred, label_embs)
 

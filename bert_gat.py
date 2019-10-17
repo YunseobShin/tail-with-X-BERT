@@ -11,6 +11,7 @@ from torch.utils.data.distributed import DistributedSampler
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn import Parameter
 from pytorch_pretrained_bert import BertTokenizer, BertModel
 from pytorch_pretrained_bert.modeling import BertPreTrainedModel, BertConfig, WEIGHTS_NAME, CONFIG_NAME
 from pytorch_pretrained_bert.optimization import BertAdam, WarmupLinearSchedule
@@ -22,16 +23,67 @@ import xbert.data_utils as data_utils
 import xbert.rf_linear as rf_linear
 import xbert.rf_util as rf_util
 from Hyperparameters import Hyperparameters
+from GCN import gen_A, gen_adj
+from GAT_layers import GraphAttentionLayer, SpGraphAttentionLayer
 
-class BertModelforClassification(BertModel):
-    def __init__(self, config, ft, num_labels):
-        super(BertModelforClassification, self).__init__(config)
+class GraphUtil():
+    def __init__(self, Y, num_labels):
+        self.Y = Y
+        self.nums = np.zeros(num_labels)
+        self.adj = np.zeros([num_labels, num_labels])
+
+    def gen_graph(self):
+        for label_list in tqdm(self.Y):
+            for i in range(len(label_list)):
+                for j in range(i+1, len(label_list)):
+                    self.adj[label_list[i]][label_list[j]] += 1
+
+    def cal_degree(self):
+        self.nums = np.sum(self.adj, axis=1)
+
+
+class SpGAT(nn.Module):
+    def __init__(self, nfeat, nclass, nhid=1024, dropout=0.5, alpha=0.2, nheads=8):
+        """Sparse version of GAT."""
+        super(SpGAT, self).__init__()
+        self.dropout = dropout
+
+        # self.attention = SpGraphAttentionLayer(nfeat,
+        #                                          nhid,
+        #                                          dropout=dropout,
+        #                                          alpha=alpha,
+        #                                          concat=False)
+        # for i, attention in enumerate(self.attentions):
+        #     self.add_module('attention_{}'.format(i), attention)
+
+        self.out_att = SpGraphAttentionLayer(nfeat,
+                                             nclass,
+                                             dropout=dropout,
+                                             alpha=alpha,
+                                             concat=False)
+
+    def forward(self, x, adj):
+        # x = F.dropout(x, self.dropout, training=self.training)
+        # x = self.attention(x, adj, dv)
+        x = F.dropout(x, self.dropout, training=self.training)
+        x = F.elu(self.out_att(x, adj))
+        return F.log_softmax(x, dim=1)
+
+class BertGAT(BertModel):
+    def __init__(self, config, ft, num_labels, res, H, device_num):
+        super(BertGAT, self).__init__(config)
+        self.device = torch.device('cuda:' + device_num)
         self.bert = BertModel.from_pretrained('bert-base-uncased')
         self.dropout = nn.Dropout(0.5)
-        # self.FCN1 = nn.Linear(768, 512)
-        self.FCN1 = nn.Linear(768, num_labels)
-        self.softmax = nn.Softmax()
         self.ft = ft
+        self.num_labels = num_labels
+        self.gat = SpGAT(nfeat=H.shape[1], nclass=num_labels).to(self.device)
+        self.FCN = nn.Linear(768, num_labels)
+        self.softmax = nn.Softmax()
+        self.H = torch.tensor(H).float().to(self.device)
+        A = torch.tensor(gen_A(num_labels, res)).float().to(self.device)
+        self.adj = gen_adj(A).detach()
+        # self.FCN2 = nn.Linear(num_labels, num_labels)
         self.apply(self.init_bert_weights)
 
     def forward(self, input_ids, token_type_ids=None, attention_mask=None):
@@ -41,9 +93,15 @@ class BertModelforClassification(BertModel):
         else:
             _, pooled_output = self.bert(input_ids, output_all_encoded_layers=False)
 
-        pooled_output = self.dropout(pooled_output)
-        logits = self.FCN1(pooled_output)
-        return self.softmax(logits)
+        bert_logits = self.dropout(pooled_output)
+        bert_logits = self.FCN(bert_logits) # 768, num_labels
+
+        x = self.gat(self.H, self.adj)
+        x = x.transpose(1, 0)
+        x = torch.matmul(bert_logits, x)
+        # logits = self.FCN2(x)
+        # return self.softmax(logits)
+        return logits
 
 
 def get_binary_vec(label_list, output_dim):
@@ -71,18 +129,19 @@ def get_score(logits, truth, k=5):
     return precision, recall
 
 
-class BertClassifier():
-    def __init__(self, hypes, heads, t, device_num, ft, epochs, max_seq_len=512):
+class BertGATClassifier():
+    def __init__(self, hypes, heads, t, device_num, ft, epochs, gutil, label_space, max_seq_len=512):
         self.max_seq_len = max_seq_len
         self.ds_path = '../datasets/' + hypes.dataset
         self.hypes = hypes
         self.epochs = epochs
         self.t = t
+        self.H = label_space.todense()
         self.heads = heads
         self.tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-        self.criterion =  nn.BCELoss()
+        self.criterion =  nn.MultiLabelSoftMarginLoss()
         self.device = torch.device('cuda:' + device_num)
-        self.model = BertModelforClassification.from_pretrained('bert-base-uncased', ft, num_labels=len(heads))
+        self.model = BertGAT.from_pretrained('bert-base-uncased', ft, len(heads), gutil, self.H, device_num)
 
     def train(self, X, Y, val_X, val_Y, model_path=None, ft_from=0):
         if model_path: # fine tuning
@@ -94,7 +153,7 @@ class BertClassifier():
         all_input_ids = torch.tensor(X)
         all_Ys = get_binary_vec(Y, len(self.heads))
         all_Ys = torch.tensor(all_Ys)
-        bs = 12
+        bs = 1
         self.model.train()
         self.model.to(self.device)
         total_run_time = 0.0
@@ -235,20 +294,6 @@ def load_data(X_path, head_X, bert):
 
     return X
 
-def gen_tails(ds_path, t):
-    with open(ds_path + '/mlc2seq/label_vocab.txt', 'r') as fin:
-        label_list = [line.strip().split('\t') for line in fin]
-
-    label_list = np.array(label_list)
-    for i, label in tqdm(enumerate(label_list)):
-        if int(label[0]) <= t:
-            tails = range(i, len(label_list))
-            break;
-
-    with open(ds_path+'/mlc2seq/tails-'+str(t), 'wb') as g:
-        pkl.dump(tails, g)
-    return tails
-
 def main():
     parser = argparse.ArgumentParser(description='')
     parser.add_argument("-ds", "--dataset", default="AmazonCat-13K", type=str, required=True)
@@ -277,8 +322,14 @@ def main():
     answer = smat.load_npz(ds_path+'/Y.tst.npz')
     with open(ds_path+'/mlc2seq/heads-'+str(head_threshold), 'rb') as g:
         heads = pkl.load(g)
+    label_space = smat.load_npz(ds_path+'/L.elmo.npz')
+    label_space = smat.lil_matrix(label_space)
+    label_space = label_space[:len(heads)]
     output_dim = len(heads)
-    bert = BertClassifier(hypes, heads, head_threshold, device_num, ft, args.epochs, max_seq_len=256)
+    gutil = GraphUtil(trn_head_Y, output_dim)
+    gutil.gen_graph()
+    gutil.cal_degree()
+    bert = BertGATClassifier(hypes, heads, head_threshold, device_num, ft, args.epochs, gutil, label_space, max_seq_len=256)
     trn_X_path = ds_path+'/head_data/trn_X-' + str(head_threshold)
     test_X_path = ds_path+'/head_data/test_X-' + str(head_threshold)
     trn_X = load_data(trn_X_path, trn_head_X, bert)
@@ -288,14 +339,14 @@ def main():
     if args.is_train:
         if ft:
             print('======================Start Fine-Tuning======================')
-            model_path = '../save_models/head_classifier/'+hypes.dataset+'/t-'+str(head_threshold)+'_ep-' + str(ft_from)+'/pytorch_model.bin'
+            model_path = '../save_models/GAT_classifier/'+hypes.dataset+'/t-'+str(head_threshold)+'_ep-' + str(ft_from)+'/pytorch_model.bin'
             bert.train(trn_X, trn_head_Y, test_X, test_head_Y, model_path, ft_from)
         else:
             print('======================Start Training======================')
             bert.train(trn_X, trn_head_Y, test_X, test_head_Y)
             # bert.save()
     else:
-        model_path = '../save_models/head_classifier/'+args.dataset+'/t-'+str(head_threshold)+'_ep-'+str(ft_from)+'/pytorch_model.bin'
+        model_path = '../save_models/GAT_classifier/'+args.dataset+'/t-'+str(head_threshold)+'_ep-'+str(ft_from)+'/pytorch_model.bin'
         print('======================Start Testing======================')
         bert.evaluate(test_X, test_head_Y, model_path)
 
