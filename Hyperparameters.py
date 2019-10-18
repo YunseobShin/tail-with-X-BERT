@@ -15,7 +15,7 @@ class Hyperparameters():
             self.depth = 9
             self.train_batch_size=8
             self.eval_batch_size=16
-            self.log_interval=200
+            self.log_interval=400
             self.eval_interval=150
             self.learning_rate=5e-5
             self.warmup_rate=0.1

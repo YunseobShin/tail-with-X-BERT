@@ -45,7 +45,7 @@ class BertGCN(BertModel):
         super(BertGCN, self).__init__(config)
         self.device = torch.device('cuda:' + device_num)
         self.bert = BertModel.from_pretrained('bert-base-uncased')
-        self.dropout = nn.Dropout(0.5)
+        self.dropout = nn.Dropout(0.6)
         self.ft = ft
         self.num_labels = num_labels
         self.FCN = nn.Linear(768, num_labels)
@@ -56,6 +56,7 @@ class BertGCN(BertModel):
         self.lkrelu = nn.LeakyReLU(0.2)
         self.A = torch.tensor(gen_A(num_labels, res)).float().to(self.device)
         self.adj = gen_adj(self.A).detach()
+        # self.FCN2 = nn.Linear(num_labels, num_labels)
 
     def reset_parameters(self):
         stdv = 1. / math.sqrt(self.gcn_weight.size(1))
@@ -72,20 +73,17 @@ class BertGCN(BertModel):
         skip = self.FCN(bert_logits)
         if gcn_limit:
             with torch.no_grad():
-                x = torch.matmul(self.adj, torch.matmul(self.H, self.gcn_weight1))
-                x = self.lkrelu(x)
-                x = x.transpose(1, 0)
-                x = torch.matmul(bert_logits, x)
+                x = torch.matmul(self.adj, self.dropout(torch.matmul(self.H, self.gcn_weight1)))
         else:
-            x = torch.matmul(self.adj, torch.matmul(self.H, self.gcn_weight1))
-            x = self.lkrelu(x)
-            x = x.transpose(1, 0)
-            x = torch.matmul(bert_logits, x)
-        # logits = self.FCN2(x)
+            x = torch.matmul(self.adj, self.dropout(torch.matmul(self.H, self.gcn_weight1)))
+        x = self.lkrelu(x)
+        x = x.transpose(1, 0)
+        x = torch.matmul(bert_logits, x)
+
         logits = x + skip
+        logits = x
         return self.softmax(logits)
         # return logits
-
 
 def get_binary_vec(label_list, output_dim):
     res = np.zeros([len(label_list), output_dim])
@@ -195,9 +193,8 @@ class BertGCNClassifier():
                 output_dir = '../save_models/head_classifier/'+self.hypes.dataset+'/t-'+str(self.t)+'_ep-'+str(epoch)+'/'
                 self.save(output_dir)
 
-            eval_idx = np.random.choice(range(0, len(val_X)), int(len(val_X)/2))
-            val_inputs = np.array(val_X)[eval_idx]
-            val_labels = np.array(val_Y)[eval_idx]
+            val_inputs = np.array(val_X)
+            val_labels = np.array(val_Y)
             acc = self.evaluate(val_inputs, val_labels)
             self.model.train()
 
@@ -327,9 +324,10 @@ def main():
         else:
             print('======================Start Training======================')
             bert.train(trn_X, trn_head_Y, test_X, test_head_Y)
-        output_dir = '../save_models/gcn_classifier/'+hypes.dataset+'/t-'+str(tail_threshold)+'_ep-' + str(epochs + ft_from) +'-'+ label_embs+'/'
-        bertReg.save(output_dir)
         bert.evaluate(test_X, test_head_Y)
+        output_dir = '../save_models/gcn_classifier/'+hypes.dataset+'/t-'+str(head_threshold)+'_ep-' + str(epochs + ft_from) +'-'+ label_embs+'/'
+        bertReg.save(output_dir)
+
     else:
         model_path = '../save_models/gcn_classifier/'+args.dataset+'/t-'+str(head_threshold)+'_ep-'+str(ft_from)+'/pytorch_model.bin'
         print('======================Start Testing======================')
