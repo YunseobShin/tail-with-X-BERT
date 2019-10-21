@@ -106,17 +106,15 @@ class BertGCN_Cluster(BertModel):
             _, pooled_output = self.bert(input_ids, output_all_encoded_layers=False)
 
         bert_logits = self.dropout(pooled_output)
-        bert_logits = self.FCN(bert_logits)
+        bert_logits = self.FCN(bert_logits) # bs * 3072
         HC = torch.matmul(self.C.transpose(1, 0), self.dropout(torch.matmul(self.H, self.W1)))
         HC = self.lkrelu(HC)
         HF = torch.matmul(self.c_adj, self.dropout(torch.matmul(HC, self.W2)))
         HF = self.lkrelu(HF)
         HF = torch.matmul(self.C, HF) + self.H # m * 3072
-        HF = HF.transpose(1, 0)
-        dot = torch.matmul(bert_logits, HF) # bs * m
-        # print(dot.shape)
-        # print(bert_logits.shape)
-        logits = dot + bert_logits
+        HF = HF.transpose(1, 0) # 3072 * m
+        logits = torch.matmul(bert_logits, HF) # bs * m
+        # logits = logits + bert_logits
         return self.softmax(logits)
 
 def get_binary_vec(label_list, output_dim):
