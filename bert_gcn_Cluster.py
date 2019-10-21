@@ -90,7 +90,7 @@ class BertGCN_Cluster(BertModel):
         self.C = get_tensor(C, self.device)
         self.c_adj = gen_adj(get_tensor(c_adj, self.device)).detach()
         self.num_labels = num_labels
-        self.FCN = nn.Linear(768, num_labels)
+        self.FCN = nn.Linear(768, H.shape[1])
         self.lkrelu = nn.LeakyReLU(0.2)
         self.softmax = nn.Softmax()
         self.apply(self.init_bert_weights)
@@ -112,7 +112,10 @@ class BertGCN_Cluster(BertModel):
         HF = torch.matmul(self.c_adj, self.dropout(torch.matmul(HC, self.W2)))
         HF = self.lkrelu(HF)
         HF = torch.matmul(self.C, HF) + self.H # m * 3072
+        HF = HF.transpose(1, 0)
         dot = torch.matmul(bert_logits, HF) # bs * m
+        # print(dot.shape)
+        # print(bert_logits.shape)
         logits = dot + bert_logits
         return self.softmax(logits)
 
