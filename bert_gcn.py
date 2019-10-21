@@ -106,6 +106,8 @@ def get_score(logits, truth, k=5):
         recall[i] = num_corrects[i]/len(truth)
     return precision, recall
 
+def get_tensor(M, dv):
+    return torch.tensor(M).float().to(dv)
 
 class BertGCNClassifier():
     def __init__(self, hypes, heads, t, device_num, ft, epochs, gutil, label_space, max_seq_len=512):
@@ -130,8 +132,6 @@ class BertGCNClassifier():
             epohcs_range = range(1, self.epochs+1)
 
         all_input_ids = torch.tensor(X)
-        all_Ys = get_binary_vec(Y, len(self.heads))
-        all_Ys = torch.tensor(all_Ys)
         bs = 12
         self.model.train()
         self.model.to(self.device)
@@ -162,7 +162,8 @@ class BertGCNClassifier():
                 # if random.randint(1, 5) != 2:
                 #     continue
                 input_ids = all_input_ids[step*bs:(step+1)*bs].to(self.device)
-                labels = all_Ys[step*bs:(step+1)*bs].to(self.device).float()
+                labels = get_binary_vec(Y[step*bs:(step+1)*bs], self.H.shape[0])
+                labels = get_tensor(labels.toarray(), self.device)
                 c_pred = self.model(input_ids)
                 loss = self.criterion(c_pred, labels)
 

@@ -80,19 +80,20 @@ def get_tensor(M, dv):
     return torch.tensor(M).float().to(dv)
 
 class BertGCN_Cluster(BertModel):
-    def __init__(self, config, ft, num_labels, H, device_num, C, c_adj):
+    def __init__(self, config, ft, num_labels, H, device_num, C, c_adj, alpha):
         super(BertGCN_Cluster, self).__init__(config)
         self.device = torch.device('cuda:' + device_num)
         self.bert = BertModel.from_pretrained('bert-base-uncased')
         self.dropout = nn.Dropout(0.5)
         self.ft = ft
+        self.alpha = alpha
         self.H = get_tensor(H, self.device)
         self.C = get_tensor(C, self.device)
         self.c_adj = gen_adj(get_tensor(c_adj, self.device)).detach()
         self.num_labels = num_labels
         self.FCN = nn.Linear(768, H.shape[1])
         self.lkrelu = nn.LeakyReLU(0.2)
-        self.softmax = nn.Softmax()
+        self.softmax = nn.Softmax(dim=1)
         self.apply(self.init_bert_weights)
 
         self.W1 = Parameter(torch.Tensor(H.shape[1], H.shape[1]))
@@ -111,7 +112,7 @@ class BertGCN_Cluster(BertModel):
         HC = self.lkrelu(HC)
         HF = torch.matmul(self.c_adj, self.dropout(torch.matmul(HC, self.W2)))
         HF = self.lkrelu(HF)
-        HF = torch.matmul(self.C, HF) + self.H # m * 3072
+        HF = self.alpha*torch.matmul(self.C, HF) + (1-self.alpha)*self.H # m * 3072
         HF = HF.transpose(1, 0) # 3072 * m
         logits = torch.matmul(bert_logits, HF) # bs * m
         # logits = logits + bert_logits
@@ -141,7 +142,7 @@ def get_score(logits, truth, k=5):
 
 
 class BertGCN_ClusterClassifier():
-    def __init__(self, hypes, device_num, ft, epochs, label_space, C, c_adj, max_seq_len=512):
+    def __init__(self, hypes, device_num, ft, epochs, label_space, C, c_adj, alpha, max_seq_len=512):
         self.max_seq_len = max_seq_len
         self.ds_path = '../datasets/' + hypes.dataset
         self.hypes = hypes
@@ -151,7 +152,7 @@ class BertGCN_ClusterClassifier():
         self.criterion =  nn.MultiLabelSoftMarginLoss()
         # self.criterion =  nn.BCELoss()
         self.device = torch.device('cuda:' + device_num)
-        self.model = BertGCN_Cluster.from_pretrained('bert-base-uncased', ft, self.H.shape[0], self.H, device_num, C, c_adj)
+        self.model = BertGCN_Cluster.from_pretrained('bert-base-uncased', ft, self.H.shape[0], self.H, device_num, C, c_adj, alpha)
 
     def train(self, X, Y, val_X, val_Y, model_path=None, ft_from=0):
         if model_path: # fine tuning
@@ -234,7 +235,6 @@ class BertGCN_ClusterClassifier():
         if model_path:
             self.model.load_state_dict(torch.load(model_path))
         all_input_ids = torch.tensor(X)
-        all_Ys = get_binary_vec(Y, self.H.shape[0])
         bs = self.hypes.eval_batch_size
         self.model.eval()
         self.model.to(self.device)
@@ -247,14 +247,14 @@ class BertGCN_ClusterClassifier():
         print('Inferencing...')
         for step in trange(int(len(X)/bs)-1):
             input_ids = all_input_ids[step*bs:(step+1)*bs].to(self.device)
-            labels = all_Ys[step*bs:(step+1)*bs]
-
+            labels = get_binary_vec(Y[step*bs:(step+1)*bs], self.H.shape[0])
+            labels = get_tensor(labels.toarray(), self.device)
             with torch.no_grad():
                 c_pred = self.model(input_ids)
 
             for i in range(len(c_pred)):
                 eval_t += 1
-                truth = labels[i]
+                truth = labels.cpu().detach().numpy().astype(int)[i]
                 logit = c_pred[i]
                 precision, recall = get_score(logit, truth)
                 precisions += precision
@@ -315,11 +315,13 @@ def main():
     parser.add_argument("-ep", "--epochs", default=8, type=int)
     parser.add_argument("-ft", "--fine_tune", default=0, type=int)
     parser.add_argument("-from", "--ft_from", default=0, type=int)
+    parser.add_argument("-al", "--alpha", default=0.8, type=float)
     args = parser.parse_args()
 
     ft = (args.fine_tune == 1)
     ft_from = args.ft_from
     num_clusters = args.k
+    alpha = args.alpha
     hypes = Hyperparameters(args.dataset)
     ds_path = '../datasets/' + args.dataset
     device_num = args.device_num
@@ -344,7 +346,7 @@ def main():
     clus_path = ds_path+'/clus_data/Cluster'
     C, c_adj = lc.spec_clustering(trn_clus_Y, clus_path)
 
-    bert = BertGCN_ClusterClassifier(hypes, device_num, ft, args.epochs, label_space, C, c_adj, max_seq_len=256)
+    bert = BertGCN_ClusterClassifier(hypes, device_num, ft, args.epochs, label_space, C, c_adj, alpha, max_seq_len=256)
     trn_X_path = ds_path+'/clus_data/trn_X'
     test_X_path = ds_path+'/clus_data/test_X'
     trn_X = load_data(trn_X_path, trn_clus_X, bert)
@@ -361,11 +363,11 @@ def main():
             print('======================Start Training======================')
             bert.train(trn_X, trn_clus_Y, test_X, test_clus_Y)
         bert.evaluate(test_X, test_clus_Y)
-        output_dir = '../save_models/gcn_clus_classifier/'+hypes.dataset+'/ep-' + str(args.epochs + ft_from)+'/'
+        output_dir = '../save_models/gcn_clus_classifier/'+hypes.dataset+'/ep-' + str(args.epochs + ft_from)+ '/al-' + str(alpha) + '/'
         bert.save(output_dir)
 
     else:
-        model_path = '../save_models/gcn_clus_classifier/'+args.dataset+'/ep-'+str(ft_from)+'/pytorch_model.bin'
+        model_path = '../save_models/gcn_clus_classifier/'+args.dataset+'/ep-'+str(ft_from)+ '/al-' +str(alpha) + '/pytorch_model.bin'
         print('======================Start Testing======================')
         bert.evaluate(test_X, test_clus_Y, model_path)
 
