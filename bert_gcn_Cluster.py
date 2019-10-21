@@ -91,13 +91,13 @@ class BertGCN_Cluster(BertModel):
         self.C = get_tensor(C, self.device)
         self.c_adj = gen_adj(get_tensor(c_adj, self.device)).detach()
         self.num_labels = num_labels
-        self.FCN = nn.Linear(768, H.shape[1])
+        self.FCN = nn.Linear(768, num_labels)
         self.lkrelu = nn.LeakyReLU(0.2)
         self.softmax = nn.Softmax(dim=1)
         self.apply(self.init_bert_weights)
 
-        self.W1 = Parameter(torch.Tensor(H.shape[1], H.shape[1]))
-        self.W2 = Parameter(torch.Tensor(H.shape[1], H.shape[1]))
+        self.W1 = Parameter(torch.Tensor(H.shape[1], 1536))
+        self.W2 = Parameter(torch.Tensor(1536, 768))
 
     def forward(self, input_ids, gcn_limit=False, token_type_ids=None, attention_mask=None):
         if self.ft:
@@ -107,15 +107,16 @@ class BertGCN_Cluster(BertModel):
             _, pooled_output = self.bert(input_ids, output_all_encoded_layers=False)
 
         bert_logits = self.dropout(pooled_output)
-        bert_logits = self.FCN(bert_logits) # bs * 3072
+        skip = self.FCN(bert_logits) # bs * m
         HC = torch.matmul(self.C.transpose(1, 0), self.dropout(torch.matmul(self.H, self.W1)))
         HC = self.lkrelu(HC)
         HF = torch.matmul(self.c_adj, self.dropout(torch.matmul(HC, self.W2)))
         HF = self.lkrelu(HF)
-        HF = self.alpha*torch.matmul(self.C, HF) + (1-self.alpha)*self.H # m * 3072
-        HF = HF.transpose(1, 0) # 3072 * m
+        # HF = self.alpha*torch.matmul(self.C, HF) + (1-self.alpha)*self.H # m * 3072
+        HF = torch.matmul(self.C, HF) # m * 768
+        HF = HF.transpose(1, 0) # 768 * m
         logits = torch.matmul(bert_logits, HF) # bs * m
-        # logits = logits + bert_logits
+        logits = logits + skip
         return self.softmax(logits)
 
 def get_binary_vec(label_list, output_dim):
@@ -147,6 +148,7 @@ class BertGCN_ClusterClassifier():
         self.ds_path = '../datasets/' + hypes.dataset
         self.hypes = hypes
         self.epochs = epochs
+        self.num_clusters = c_adj.shape[0]
         self.H = label_space.todense()
         self.tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
         self.criterion =  nn.MultiLabelSoftMarginLoss()
@@ -222,7 +224,7 @@ class BertGCN_ClusterClassifier():
                     print('Recall:', np.round(recalls/eval_t, 4))
 
             # if epoch % 20 == 0:
-            output_dir = '../save_models/gcn_classifier/'+self.hypes.dataset+'/ep-'+str(epoch)+'/'
+            output_dir = '../save_models/gcn_classifier/'+self.hypes.dataset+'/ep-'+str(epoch)+'/k-'+str(self.num_clusters)+'/'
             self.save(output_dir)
 
             val_inputs = np.array(val_X)
@@ -315,7 +317,7 @@ def main():
     parser.add_argument("-ep", "--epochs", default=8, type=int)
     parser.add_argument("-ft", "--fine_tune", default=0, type=int)
     parser.add_argument("-from", "--ft_from", default=0, type=int)
-    parser.add_argument("-al", "--alpha", default=0.8, type=float)
+    parser.add_argument("-al", "--alpha", default=1.0, type=float)
     args = parser.parse_args()
 
     ft = (args.fine_tune == 1)
@@ -343,7 +345,7 @@ def main():
 
     lc = LabelCluster(adj, num_clusters)
     # c_adj: k*k, C: m*k
-    clus_path = ds_path+'/clus_data/Cluster'
+    clus_path = ds_path+'/clus_data/Cluster_k-' + str(num_clusters)
     C, c_adj = lc.spec_clustering(trn_clus_Y, clus_path)
 
     bert = BertGCN_ClusterClassifier(hypes, device_num, ft, args.epochs, label_space, C, c_adj, alpha, max_seq_len=256)
@@ -363,11 +365,11 @@ def main():
             print('======================Start Training======================')
             bert.train(trn_X, trn_clus_Y, test_X, test_clus_Y)
         bert.evaluate(test_X, test_clus_Y)
-        output_dir = '../save_models/gcn_clus_classifier/'+hypes.dataset+'/ep-' + str(args.epochs + ft_from)+ '/al-' + str(alpha) + '/'
+        output_dir = '../save_models/gcn_clus_classifier/'+hypes.dataset+'/ep-' + str(args.epochs + ft_from)+ '/k-' + str(num_clusters) + '/'
         bert.save(output_dir)
 
     else:
-        model_path = '../save_models/gcn_clus_classifier/'+args.dataset+'/ep-'+str(ft_from)+ '/al-' +str(alpha) + '/pytorch_model.bin'
+        model_path = '../save_models/gcn_clus_classifier/'+args.dataset+'/ep-'+str(ft_from)+ '/k-' +str(num_clusters) + '/pytorch_model.bin'
         print('======================Start Testing======================')
         bert.evaluate(test_X, test_clus_Y, model_path)
 
