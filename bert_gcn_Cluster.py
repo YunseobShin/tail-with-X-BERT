@@ -112,7 +112,6 @@ class BertGCN_Cluster(BertModel):
         HF = torch.matmul(self.c_adj, self.dropout(torch.matmul(HC, self.W2)))
         HF = self.lkrelu(HF)
         HF = torch.matmul(self.C, HF) + self.H
-        HF = HF.transpose(1, 0)
         dot = torch.matmul(bert_logits, HF)
         logits = dot + bert_logits
         return self.softmax(logits)
