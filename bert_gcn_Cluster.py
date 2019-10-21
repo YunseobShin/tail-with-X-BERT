@@ -36,30 +36,44 @@ class GraphUtil():
         for label_list in tqdm(self.Y):
             for i in range(len(label_list)):
                 for j in range(i+1, len(label_list)):
-                    self.adj[label_list[i]][label_list[j]] += 1
-                    self.adj[label_list[j]][label_list[i]] += 1
+                    self.adj[label_list[i]][label_list[j]] = 1
+                    self.adj[label_list[j]][label_list[i]] = 1
         return self.adj
 
     def cal_degree(self):
         self.nums = np.sum(self.adj, axis=1)
 
 class LabelCluster():
-    def __init__(self, adj):
-        self.A = adj
+    def __init__(self, adj, k):
+        self.adj = adj
+        self.k = k
         self.C = np.zeros(([self.adj.shape[0], k]))
         self.c_adj = np.zeros(([k,k]))
 
-    def spec_clustering(self, k, Y):
-        clustering = SpectralClustering(n_clusters = k,
-            assign_labels="discretize", affinity='precomputed', random_state=0).fit(self.A)
-        clusters = clustering.labels_
-        for idx, c in enumerate(clusters):
-            self.C[idx, c] = 1
-        for label_list in tqdm(Y):
-            for i in range(len(label_list)):
-                for j in range(i+1, len(label_list)):
-                    self.c_adj[np.argmax(self.C[label_list[i]]), np.argmax(self.C[label_list[j]])] =+ 1
-                    self.c_adj[np.argmax(self.C[label_list[j]]), np.argmax(self.C[label_list[i]])] =+ 1
+    def spec_clustering(self, Y, clus_path):
+        if os.path.isfile(clus_path+'-C'):
+            with open(clus_path+'-C', 'rb') as g:
+                self.C = np.load(g)
+            with open(clus_path+'-c_adj', 'rb') as g:
+                self.c_adj = np.load(g)
+        else:
+            clustering = SpectralClustering(n_clusters = self.k,
+                assign_labels="discretize", affinity='precomputed', random_state=0).fit(self.adj)
+            clusters = clustering.labels_
+            for idx, c in enumerate(clusters):
+                self.C[idx, c] = 1
+            for label_list in tqdm(Y):
+                for i in range(len(label_list)):
+                    for j in range(i+1, len(label_list)):
+                        self.c_adj[np.argmax(self.C[label_list[i]]), np.argmax(self.C[label_list[j]])] = 1
+                        self.c_adj[np.argmax(self.C[label_list[j]]), np.argmax(self.C[label_list[i]])] = 1
+
+            self.c_adj[np.where(np.eye(self.k))] = 1
+            with open(clus_path+'-C', 'wb') as g:
+                np.save(g, self.C)
+            with open(clus_path+'-c_adj', 'wb') as g:
+                np.save(g, self.c_adj)
+
         return self.C, self.c_adj
 
 def get_tensor(M, dv):
@@ -74,7 +88,7 @@ class BertGCN_Cluster(BertModel):
         self.ft = ft
         self.H = get_tensor(H, self.device)
         self.C = get_tensor(C, self.device)
-        self.c_adj = get_tensor(c_adj, self.device)
+        self.c_adj = gen_adj(get_tensor(c_adj, self.device)).detach()
         self.num_labels = num_labels
         self.FCN = nn.Linear(768, num_labels)
         self.lkrelu = nn.LeakyReLU(0.2)
@@ -96,8 +110,8 @@ class BertGCN_Cluster(BertModel):
         HC = torch.matmul(self.C.transpose(1, 0), self.dropout(torch.matmul(self.H, self.W1)))
         HC = self.lkrelu(HC)
         HF = torch.matmul(self.c_adj, self.dropout(torch.matmul(HC, self.W2)))
-        HF =+ self.H
-
+        HF = self.lkrelu(HF)
+        HF = torch.matmul(self.C, HF) + self.H
         HF = HF.transpose(1, 0)
         dot = torch.matmul(bert_logits, HF)
         logits = dot + bert_logits
@@ -105,9 +119,9 @@ class BertGCN_Cluster(BertModel):
 
 def get_binary_vec(label_list, output_dim):
     res = np.zeros([len(label_list), output_dim])
-    for i, label in tqdm(enumerate(label_list)):
+    for i, label in enumerate(label_list):
         res[i][label]=1
-    return res
+    return smat.lil_matrix(res)
 
 def get_score(logits, truth, k=5):
     num_corrects = np.zeros(k)
@@ -147,8 +161,8 @@ class BertGCN_ClusterClassifier():
             epohcs_range = range(1, self.epochs+1)
 
         all_input_ids = torch.tensor(X)
-        all_Ys = get_binary_vec(Y, self.H.shape[0])
-        all_Ys = torch.tensor(all_Ys)
+        # all_Ys = get_binary_vec(Y, self.H.shape[0])
+        # all_Ys = torch.tensor(all_Ys)
         bs = 12
         self.model.train()
         self.model.to(self.device)
@@ -179,7 +193,8 @@ class BertGCN_ClusterClassifier():
                 # if random.randint(1, 5) != 2:
                 #     continue
                 input_ids = all_input_ids[step*bs:(step+1)*bs].to(self.device)
-                labels = all_Ys[step*bs:(step+1)*bs].to(self.device).float()
+                labels = get_binary_vec(Y[step*bs:(step+1)*bs], self.H.shape[0])
+                labels = get_tensor(labels.toarray(), self.device)
                 c_pred = self.model(input_ids)
                 loss = self.criterion(c_pred, labels)
 
@@ -280,9 +295,6 @@ class BertGCN_ClusterClassifier():
         model_to_save.config.to_json_file(output_config_file)
 
 def load_data(X_path, X, bert):
-    if not os.path.exists(X_path):
-        os.makedirs(X_path)
-
     if os.path.isfile(X_path):
         with open(X_path, 'rb') as g:
             X = pkl.load(g)
@@ -327,9 +339,10 @@ def main():
     gutil = GraphUtil(trn_clus_Y, output_dim)
     adj = gutil.gen_graph()
 
-    lc = LabelCluster(adj)
+    lc = LabelCluster(adj, num_clusters)
     # c_adj: k*k, C: m*k
-    C, c_adj = lc.spec_clustering(label_space, num_clusters)
+    clus_path = ds_path+'/clus_data/Cluster'
+    C, c_adj = lc.spec_clustering(trn_clus_Y, clus_path)
 
     bert = BertGCN_ClusterClassifier(hypes, device_num, ft, args.epochs, label_space, C, c_adj, max_seq_len=256)
     trn_X_path = ds_path+'/clus_data/trn_X'
