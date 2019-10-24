@@ -1,7 +1,7 @@
 import argparse
 import os, sys, time
 import pickle as pkl
-from sklearn.cluster import SpectralClustering
+from sklearn.cluster import SpectralClustering, MiniBatchKMeans
 import scipy.sparse as smat
 from xbert.rf_util import smat_util
 import numpy as np
@@ -38,6 +38,7 @@ class GraphUtil():
                 for j in range(i+1, len(label_list)):
                     self.adj[label_list[i]][label_list[j]] = 1
                     self.adj[label_list[j]][label_list[i]] = 1
+
         return self.adj
 
     def cal_degree(self):
@@ -51,15 +52,33 @@ class LabelCluster():
         self.c_adj = np.zeros(([k,k]))
 
     def spec_clustering(self, Y, clus_path):
+        clus_path += 'spec'
         if os.path.isfile(clus_path+'-C'):
             with open(clus_path+'-C', 'rb') as g:
                 self.C = np.load(g)
             with open(clus_path+'-c_adj', 'rb') as g:
                 self.c_adj = np.load(g)
+            return self.C, self.c_adj
         else:
             clustering = SpectralClustering(n_clusters = self.k,
                 assign_labels="discretize", affinity='precomputed', random_state=0).fit(self.adj)
             clusters = clustering.labels_
+            return self.get_cluster_graph(Y, clusters, clus_path)
+
+    def kmeans_clustering(self, Y, label_space, clus_path):
+        clus_path += 'kmeans'
+        if os.path.isfile(clus_path+'-C'):
+            with open(clus_path+'-C', 'rb') as g:
+                self.C = np.load(g)
+            with open(clus_path+'-c_adj', 'rb') as g:
+                self.c_adj = np.load(g)
+            return self.C, self.c_adj
+        else:
+            clustering = MiniBatchKMeans(n_clusters = self.k, random_state=0).fit(label_space)
+            clusters = clustering.labels_
+            return self.get_cluster_graph(Y, clusters, clus_path)
+
+    def get_cluster_graph(self, Y, clusters, clus_path):
             for idx, c in enumerate(clusters):
                 self.C[idx, c] = 1
             for label_list in tqdm(Y):
@@ -74,7 +93,7 @@ class LabelCluster():
             with open(clus_path+'-c_adj', 'wb') as g:
                 np.save(g, self.c_adj)
 
-        return self.C, self.c_adj
+            return self.C, self.c_adj
 
 def get_tensor(M, dv):
     return torch.tensor(M).float().to(dv)
@@ -92,6 +111,8 @@ class BertGCN_Cluster(BertModel):
         self.c_adj = gen_adj(get_tensor(c_adj, self.device)).detach()
         self.num_labels = num_labels
         self.FCN = nn.Linear(768, num_labels)
+        self.FCN_gcn = nn.Linear(768, 768)
+        self.FCN_H = nn.Linear(H.shape[1], 768)
         self.lkrelu = nn.LeakyReLU(0.2)
         self.softmax = nn.Softmax(dim=1)
         self.apply(self.init_bert_weights)
@@ -108,13 +129,15 @@ class BertGCN_Cluster(BertModel):
 
         bert_logits = self.dropout(pooled_output)
         skip = self.FCN(bert_logits) # bs * m
+        bert_logits = self.lkrelu(self.FCN_gcn(bert_logits))
         HC = torch.matmul(self.C.transpose(1, 0), self.dropout(torch.matmul(self.H, self.W1)))
         HC = self.lkrelu(HC)
+        H_skip = self.dropout(self.lkrelu(self.FCN_H(self.H))) # m * 768
         HF = torch.matmul(self.c_adj, self.dropout(torch.matmul(HC, self.W2)))
         HF = self.lkrelu(HF)
-        # HF = self.alpha*torch.matmul(self.C, HF) + (1-self.alpha)*self.H # m * 3072
         HF = torch.matmul(self.C, HF) # m * 768
         HF = HF.transpose(1, 0) # 768 * m
+
         logits = torch.matmul(bert_logits, HF) # bs * m
         logits = logits + skip
         return self.softmax(logits)
@@ -316,6 +339,7 @@ def main():
     parser.add_argument("-train", "--is_train", default=1, type=int)
     parser.add_argument("-ep", "--epochs", default=8, type=int)
     parser.add_argument("-ft", "--fine_tune", default=0, type=int)
+    parser.add_argument("-clu", "--clustering", default='spec', type=str)
     parser.add_argument("-from", "--ft_from", default=0, type=int)
     parser.add_argument("-al", "--alpha", default=1.0, type=float)
     args = parser.parse_args()
@@ -342,11 +366,16 @@ def main():
     output_dim = label_space.shape[0]
     gutil = GraphUtil(trn_clus_Y, output_dim)
     adj = gutil.gen_graph()
-
+    # gutil.cal_degree()
     lc = LabelCluster(adj, num_clusters)
     # c_adj: k*k, C: m*k
-    clus_path = ds_path+'/clus_data/Cluster_k-' + str(num_clusters)
-    C, c_adj = lc.spec_clustering(trn_clus_Y, clus_path)
+    clus_path = ds_path+'/clus_data/k-' + str(num_clusters)
+    if args.clustering == 'kmeans':
+        C, c_adj = lc.kmeans_clustering(trn_clus_Y, label_space, clus_path)
+    elif args.clustering == 'spec':
+        C, c_adj = lc.spec_clustering(trn_clus_Y, clus_path)
+    else:
+        C, c_adj = lc.spec_clustering(trn_clus_Y, clus_path)
 
     bert = BertGCN_ClusterClassifier(hypes, device_num, ft, args.epochs, label_space, C, c_adj, alpha, max_seq_len=256)
     trn_X_path = ds_path+'/clus_data/trn_X'

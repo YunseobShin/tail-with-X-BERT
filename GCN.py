@@ -11,12 +11,11 @@ def gen_A(num_classes, result):
     _nums = _nums[:, np.newaxis]
     _nums[np.where(_nums==0)] = 1
     _adj = _adj / _nums
-    # t = np.median(_adj[np.where(_adj)])
-    t=0
-    _adj[_adj <= t] = 0
-    _adj[_adj > t] = 1
-    _adj = _adj * 0.1 / (_adj.sum(0, keepdims=True) + 1e-6)
-    _adj = _adj + np.identity(num_classes, np.int)
+    # t=0
+    # _adj[_adj <= t] = 0
+    # _adj[_adj > t] = 1
+    # _adj = _adj * 0.1 / (_adj.sum(0, keepdims=True) + 1e-6)
+    # _adj = _adj + np.identity(num_classes, np.int)
     return _adj
 
 def gen_adj(A):
