@@ -113,7 +113,8 @@ class BertGCN_Cluster(BertModel):
         self.FCN = nn.Linear(768, num_labels)
         self.FCN_gcn = nn.Linear(768, 768)
         self.FCN_H = nn.Linear(H.shape[1], 768)
-        self.lkrelu = nn.LeakyReLU(0.2)
+        self.actv = nn.LeakyReLU(0.2)
+        # self.actv = nn.Tanh()
         self.softmax = nn.Softmax(dim=1)
         self.apply(self.init_bert_weights)
 
@@ -129,17 +130,18 @@ class BertGCN_Cluster(BertModel):
 
         bert_logits = self.dropout(pooled_output)
         skip = self.FCN(bert_logits) # bs * m
-        bert_logits = self.lkrelu(self.FCN_gcn(bert_logits))
+        # bert_logits = self.actv(self.FCN_gcn(bert_logits))
         HC = torch.matmul(self.C.transpose(1, 0), self.dropout(torch.matmul(self.H, self.W1)))
-        HC = self.lkrelu(HC)
-        H_skip = self.dropout(self.lkrelu(self.FCN_H(self.H))) # m * 768
+        HC = self.actv(HC)
+        H_skip = self.dropout(self.actv(self.FCN_H(self.H))) # m * 768
         HF = torch.matmul(self.c_adj, self.dropout(torch.matmul(HC, self.W2)))
-        HF = self.lkrelu(HF)
+        HF = self.actv(HF)
         HF = torch.matmul(self.C, HF) # m * 768
         HF = HF.transpose(1, 0) # 768 * m
 
         logits = torch.matmul(bert_logits, HF) # bs * m
         logits = logits + skip
+        # return logits
         return self.softmax(logits)
 
 def get_binary_vec(label_list, output_dim):
@@ -174,8 +176,8 @@ class BertGCN_ClusterClassifier():
         self.num_clusters = c_adj.shape[0]
         self.H = label_space.todense()
         self.tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-        self.criterion =  nn.MultiLabelSoftMarginLoss()
-        # self.criterion =  nn.BCELoss()
+        # self.criterion =  nn.MultiLabelSoftMarginLoss()
+        self.criterion =  nn.BCELoss()
         self.device = torch.device('cuda:' + device_num)
         self.model = BertGCN_Cluster.from_pretrained('bert-base-uncased', ft, self.H.shape[0], self.H, device_num, C, c_adj, alpha)
 
@@ -247,7 +249,8 @@ class BertGCN_ClusterClassifier():
                     print('Recall:', np.round(recalls/eval_t, 4))
 
             # if epoch % 20 == 0:
-            output_dir = '../save_models/gcn_classifier/'+self.hypes.dataset+'/ep-'+str(epoch)+'/k-'+str(self.num_clusters)+'/'
+            output_dir = '/mnt/sdb/yss/xbert_save_models/gcn_classifier/'+self.hypes.dataset+'/ep-'+str(epoch)+'/k-'+str(self.num_clusters)+'/'
+            # output_dir = '../save_models/gcn_classifier/'+self.hypes.dataset+'/ep-'+str(epoch)+'/k-'+str(self.num_clusters)+'/'
             self.save(output_dir)
 
             val_inputs = np.array(val_X)
