@@ -19,6 +19,7 @@ from pytorch_pretrained_bert.optimization import BertAdam, WarmupLinearSchedule
 from gensim.models import KeyedVectors as KV
 from sklearn.neighbors import NearestNeighbors as NN
 import random
+from sklearn.decomposition import TruncatedSVD
 # from mather.bert import *
 import xbert.data_utils as data_utils
 import xbert.rf_linear as rf_linear
@@ -111,15 +112,14 @@ class BertGCN_Cluster(BertModel):
         self.c_adj = gen_adj(get_tensor(c_adj, self.device)).detach() # C * C
         self.num_labels = num_labels
         self.FCN = nn.Linear(768, num_labels)
-        self.FCN_gcn = nn.Linear(768, 768)
         self.FCN_H = nn.Linear(H.shape[1], 768)
         self.actv = nn.LeakyReLU(0.2)
         # self.actv = nn.Tanh()
         self.softmax = nn.Softmax(dim=1)
         self.apply(self.init_bert_weights)
 
-        self.W1 = Parameter(torch.Tensor(H.shape[1], 1536))
-        self.W2 = Parameter(torch.Tensor(1536, 768))
+        self.W1 = Parameter(torch.Tensor(H.shape[1], 768))
+        self.W2 = Parameter(torch.Tensor(768, 768))
 
     def forward(self, input_ids, gcn_limit=False, token_type_ids=None, attention_mask=None):
         if self.ft:
@@ -130,7 +130,6 @@ class BertGCN_Cluster(BertModel):
 
         bert_logits = self.dropout(pooled_output)
         skip = self.FCN(bert_logits) # bs * m
-        # bert_logits = self.actv(self.FCN_gcn(bert_logits))
         HC = torch.matmul(self.C.transpose(1, 0), self.dropout(torch.matmul(self.H, self.W1)))
         HC = self.actv(HC)
         H_skip = self.dropout(self.actv(self.FCN_H(self.H))) # m * 768
@@ -143,6 +142,11 @@ class BertGCN_Cluster(BertModel):
         logits = logits + skip
         # return logits
         return self.softmax(logits)
+
+    def get_bertout(self, input_ids):
+        with torch.no_grad():
+            _, pooled_output = self.bert(input_ids, output_all_encoded_layers=False)
+        return pooled_output
 
 def get_binary_vec(label_list, output_dim):
     res = np.zeros([len(label_list), output_dim])
@@ -166,7 +170,6 @@ def get_score(logits, truth, k=5):
         recall[i] = num_corrects[i]/len(truth)
     return precision, recall
 
-
 class BertGCN_ClusterClassifier():
     def __init__(self, hypes, device_num, ft, epochs, label_space, C, c_adj, alpha, max_seq_len=512):
         self.max_seq_len = max_seq_len
@@ -174,12 +177,38 @@ class BertGCN_ClusterClassifier():
         self.hypes = hypes
         self.epochs = epochs
         self.num_clusters = c_adj.shape[0]
-        self.H = label_space.todense()
+        self.H = label_space
         self.tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
         # self.criterion =  nn.MultiLabelSoftMarginLoss()
         self.criterion =  nn.BCELoss()
         self.device = torch.device('cuda:' + device_num)
-        self.model = BertGCN_Cluster.from_pretrained('bert-base-uncased', ft, self.H.shape[0], self.H, device_num, C, c_adj, alpha)
+        self.model = BertGCN_Cluster.from_pretrained('bert-base-uncased', \
+            ft, self.H.shape[0], self.H, device_num, C, c_adj, alpha)
+
+
+    def update_label_feature(self, X, Y, ep, output_dir):
+        feature_path = output_dir + 'L.BERT-ep_'+str(ep)+'.npz'
+        self.model.eval()
+        self.model.to(self.device)
+        print('updating label fetures...')
+        all_input_ids = torch.tensor(X)
+        Y = get_binary_vec(Y, self.H.shape[0]).transpose() # m * n
+        Y_nums = []
+        for i in range(Y.shape[0]):
+            num = len(smat.find(Y[i])[0])
+            if num != 0:
+                Y_nums.append(num)
+            else:
+                Y_nums.append(1)
+        outputs = smat.lil_matrix(np.zeros([X.shape[0], 768]))
+        bs = 50
+        for step in trange(int(len(X)/bs)-1):
+            with torch.no_grad():
+                output = self.model.get_bertout(input_ids[step*bs:(step+1)*bs])
+            outputs[step*bs:(step+1)*bs] = output
+        new_Y = np.array(Y.dot(outputs)) / Y_nums
+        np.save(feature_path, new_Y)
+        return new_Y
 
     def train(self, X, Y, val_X, val_Y, model_path=None, ft_from=0):
         if model_path: # fine tuning
@@ -218,8 +247,8 @@ class BertGCN_ClusterClassifier():
             precisions=np.zeros(5)
             recalls=np.zeros(5)
             for step in range(int(len(X)/bs)-1):
-                # if random.randint(1, 5) != 2:
-                #     continue
+                if random.randint(1, 10) != 2:
+                    continue
                 input_ids = all_input_ids[step*bs:(step+1)*bs].to(self.device)
                 labels = get_binary_vec(Y[step*bs:(step+1)*bs], self.H.shape[0])
                 labels = get_tensor(labels.toarray(), self.device)
@@ -251,13 +280,13 @@ class BertGCN_ClusterClassifier():
             # if epoch % 20 == 0:
             # output_dir = '/mnt/sdb/yss/xbert_save_models/gcn_classifier/'+self.hypes.dataset+'/ep-'+str(epoch)+'/k-'+str(self.num_clusters)+'/'
             output_dir = '../save_models/gcn_classifier/'+self.hypes.dataset+'/ep-'+str(epoch)+'/k-'+str(self.num_clusters)+'/'
+            model.H = get_tensor(update_label_feature(X, Y, epoch, output_dir), self.device)
             self.save(output_dir)
 
             val_inputs = np.array(val_X)
             val_labels = np.array(val_Y)
             acc = self.evaluate(val_inputs, val_labels)
             self.model.train()
-
 
     def evaluate(self, X, Y, model_path=''):
         if model_path:
@@ -366,12 +395,22 @@ def main():
     answer = smat.load_npz(ds_path+'/Y.tst.npz')
     label_space = smat.load_npz(ds_path+'/L.elmo.npz')
     label_space = smat.lil_matrix(label_space)
+    trunc_label_path = ds_path+'/L.elmo_768.npz'
+    print('reducing dimensions in label space with t-SVD...')
+    if os.path.exists(trunc_label_path):
+        label_space = np.load(trunc_label_path)
+    else:
+        tsvd = TruncatedSVD(768)
+        label_space = tsvd.fit_transform(label_space)
+        np.save(trunc_label_path, label_space)
+
     output_dim = label_space.shape[0]
     gutil = GraphUtil(trn_clus_Y, output_dim)
     adj = gutil.gen_graph()
     # gutil.cal_degree()
     lc = LabelCluster(adj, num_clusters)
     # c_adj: k*k, C: m*k
+    print('partitioning labels with' + args.clustering + ' clustering...')
     clus_path = ds_path+'/clus_data/k-' + str(num_clusters)
     if args.clustering == 'kmeans':
         C, c_adj = lc.kmeans_clustering(trn_clus_Y, label_space, clus_path)
@@ -379,7 +418,6 @@ def main():
         C, c_adj = lc.spec_clustering(trn_clus_Y, clus_path)
     else:
         C, c_adj = lc.spec_clustering(trn_clus_Y, clus_path)
-
     bert = BertGCN_ClusterClassifier(hypes, device_num, ft, args.epochs, label_space, C, c_adj, alpha, max_seq_len=256)
     trn_X_path = ds_path+'/clus_data/trn_X'
     test_X_path = ds_path+'/clus_data/test_X'

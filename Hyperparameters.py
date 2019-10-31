@@ -24,7 +24,7 @@ class Hyperparameters():
             self.dataset = 'AmazonCat-13K'
             self.depth=8
             self.train_batch_size=8
-            self.eval_batch_size=48
+            self.eval_batch_size=12
             self.log_interval=4000
             self.eval_interval=100
             self.learning_rate=5e-5
