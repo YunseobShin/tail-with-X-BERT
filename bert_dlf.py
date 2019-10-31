@@ -395,7 +395,7 @@ def main():
     answer = smat.load_npz(ds_path+'/Y.tst.npz')
     label_space = smat.load_npz(ds_path+'/L.elmo.npz')
     label_space = smat.lil_matrix(label_space)
-    trunc_label_path = ds_path+'/L.elmo_768.npz'
+    trunc_label_path = ds_path+'/L.elmo_768.npy'
     print('reducing dimensions in label space with t-SVD...')
     if os.path.exists(trunc_label_path):
         label_space = np.load(trunc_label_path)
