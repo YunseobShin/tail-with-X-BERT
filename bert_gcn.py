@@ -47,14 +47,14 @@ class BertGCN(BertModel):
         self.device = torch.device('cuda:' + device_num)
         self.bert = BertModel.from_pretrained('bert-base-uncased')
         self.dropout = nn.Dropout(0.5)
+        self.H = get_tensor(H, self.device)
         self.ft = ft
         self.num_labels = num_labels
         self.FCN = nn.Linear(768, num_labels)
-        self.softmax = nn.Softmax()
+        self.softmax = nn.Softmax(dim=1)
         self.apply(self.init_bert_weights)
         self.gcn_weight1 = Parameter(torch.Tensor(H.shape[1], 1500))
         self.gcn_weight2 = Parameter(torch.Tensor(1500, 768))
-        self.H = torch.tensor(H).float().to(self.device)
         self.lkrelu = nn.LeakyReLU(0.2)
         self.A = torch.tensor(gen_A(num_labels, res)).float().to(self.device)
         # self.A = Parameter(torch.from_numpy(gen_A(num_labels, res)).float()).to(self.device)
@@ -84,10 +84,24 @@ class BertGCN(BertModel):
         return self.softmax(logits)
         # return logits
 
-def get_binary_vec(label_list, output_dim):
-    res = np.zeros([len(label_list), output_dim])
-    for i, label in tqdm(enumerate(label_list)):
-        res[i][label]=1
+    def get_bertout(self, input_ids):
+        with torch.no_grad():
+            _, pooled_output = self.bert(input_ids, output_all_encoded_layers=False)
+        return pooled_output
+
+def get_binary_vec(label_list, output_dim, divide=False):
+    if divide:
+        bs = int(len(label_list)/10)
+        res = smat.lil_matrix(np.zeros([len(label_list[:bs]), output_dim]))
+        for step in range(1, int(len(label_list)/bs+1)):
+            t = smat.lil_matrix(np.zeros([len(label_list[step*bs:(step+1)*bs]), output_dim]))
+            res = smat.vstack([res, t])
+        res = smat.lil_matrix(res)
+    else:
+        res = smat.lil_matrix(np.zeros([len(label_list), output_dim]))
+    # print(res.shape)
+    for i, label in enumerate(label_list):
+        res[i, label]=1
     return res
 
 def get_score(logits, truth, k=5):
@@ -115,14 +129,37 @@ class BertGCNClassifier():
         self.ds_path = '../datasets/' + hypes.dataset
         self.hypes = hypes
         self.epochs = epochs
+        self.ft = ft
         self.t = t
-        self.H = label_space.todense()
+        self.H = label_space
         self.heads = heads
         self.tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-        # self.criterion =  nn.MultiLabelSoftMarginLoss()
-        self.criterion =  nn.BCELoss()
+        self.criterion =  nn.MultiLabelSoftMarginLoss()
+        # self.criterion =  nn.BCELoss()
         self.device = torch.device('cuda:' + device_num)
         self.model = BertGCN.from_pretrained('bert-base-uncased', ft, len(heads), gutil, self.H, device_num)
+
+    def update_label_feature(self, X, Y, ep, output_dir):
+        feature_path = output_dir + 'L.BERT-head_'+str(self.t)+'-ep_'+str(ep)+'.npz'
+        self.model.eval()
+        self.model.to(self.device)
+        print('updating label fetures...')
+        all_input_ids = torch.tensor(X)
+
+        Y = get_binary_vec(Y, self.H.shape[0], divide=True).transpose() # m * n
+        outputs = np.zeros([Y.shape[0], 768])
+
+        sample_size = 20
+        for i in trange(Y.shape[0]):
+            y = Y[i].todense()
+            inds = np.where(y)[0]
+            inds = np.random.choice(inds, sample_size)
+            input_ids = all_input_ids[inds].to(self.device)
+            with torch.no_grad():
+                output = self.model.get_bertout(input_ids).cpu().detach().numpy()
+            outputs[i] = np.mean(output, axis=0)
+
+        return outputs
 
     def train(self, X, Y, val_X, val_Y, model_path=None, ft_from=0):
         if model_path: # fine tuning
@@ -159,12 +196,15 @@ class BertGCNClassifier():
             precisions=np.zeros(5)
             recalls=np.zeros(5)
             for step in range(int(len(X)/bs)-1):
-                # if random.randint(1, 5) != 2:
+                # if step % self.hypes.log_interval != 0:
                 #     continue
                 input_ids = all_input_ids[step*bs:(step+1)*bs].to(self.device)
                 labels = get_binary_vec(Y[step*bs:(step+1)*bs], self.H.shape[0])
                 labels = get_tensor(labels.toarray(), self.device)
                 c_pred = self.model(input_ids)
+                # print(c_pred.shape)
+                # print(labels.shape)
+                # exit()
                 loss = self.criterion(c_pred, labels)
 
                 tr_loss += loss.item()
@@ -191,6 +231,8 @@ class BertGCNClassifier():
 
             # if epoch % 20 == 0:
             output_dir = '../save_models/gcn_classifier/'+self.hypes.dataset+'/t-'+str(self.t)+'_ep-'+str(epoch)+'/'
+            if not self.ft:
+                self.model.H = get_tensor(self.update_label_feature(X, Y, epoch, output_dir), self.device)
             self.save(output_dir)
 
             val_inputs = np.array(val_X)
@@ -217,13 +259,13 @@ class BertGCNClassifier():
         for step in trange(int(len(X)/bs)-1):
             input_ids = all_input_ids[step*bs:(step+1)*bs].to(self.device)
             labels = all_Ys[step*bs:(step+1)*bs]
-
+            labels = get_tensor(labels.toarray(), self.device)
             with torch.no_grad():
                 c_pred = self.model(input_ids)
 
             for i in range(len(c_pred)):
                 eval_t += 1
-                truth = labels[i]
+                truth = labels.cpu().detach().numpy().astype(int)[i]
                 logit = c_pred[i]
                 precision, recall = get_score(logit, truth)
                 precisions += precision
@@ -274,6 +316,19 @@ def load_data(X_path, head_X, bert):
 
     return X
 
+def load_label(ds_path):
+    label_space = smat.load_npz(ds_path+'/L.elmo.npz')
+    label_space = smat.lil_matrix(label_space)
+    label_path = ds_path+'/L.elmo_768.npy'
+    print('reducing dimensions in label space with t-SVD...')
+    if os.path.exists(label_path):
+        label_space = np.load(label_path)
+    else:
+        tsvd = TruncatedSVD(768)
+        label_space = tsvd.fit_transform(label_space)
+        np.save(label_path, label_space)
+    return label_space
+
 def main():
     parser = argparse.ArgumentParser(description='')
     parser.add_argument("-ds", "--dataset", default="AmazonCat-13K", type=str, required=True)
@@ -302,9 +357,10 @@ def main():
     answer = smat.load_npz(ds_path+'/Y.tst.npz')
     with open(ds_path+'/mlc2seq/heads-'+str(head_threshold), 'rb') as g:
         heads = pkl.load(g)
-    label_space = smat.load_npz(ds_path+'/L.elmo.npz')
-    label_space = smat.lil_matrix(label_space)
+
+    label_space = load_label(ds_path)
     label_space = label_space[:len(heads)]
+
     output_dim = len(heads)
     gutil = GraphUtil(trn_head_Y, output_dim)
     gutil.gen_graph()

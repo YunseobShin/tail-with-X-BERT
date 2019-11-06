@@ -169,7 +169,7 @@ class Metrics(collections.namedtuple('Metrics', ['prec', 'recall'])):
         return cls(prec=[], recall=[])
 
     @classmethod
-    def generate(cls, tY, pY, tails, topk=10):
+    def generate(cls, tY, pY, topk=10):
         assert isinstance(tY, smat.csr_matrix), type(tY)
         assert isinstance(pY, smat.csr_matrix), type(pY)
         assert tY.shape == pY.shape, "tY.shape = {}, pY.shape = {}".format(tY.shape, pY.shape)
@@ -188,31 +188,6 @@ class Metrics(collections.namedtuple('Metrics', ['prec', 'recall'])):
         prec = total_matched / tY.shape[0] / sp.arange(1, topk + 1)
         recall = recall / tY.shape[0]
         return cls(prec=prec, recall=recall)
-
-    @classmethod
-    def evaluate_tails(cls, ans, preds, tails, topk = 1):
-        assert isinstance(ans, smat.csr_matrix), type(tY)
-        assert isinstance(preds, smat.csr_matrix), type(pY)
-        assert ans.shape == preds.shape, "tY.shape = {}, pY.shape = {}".format(ans.shape, preds.shape)
-        total_matched = sp.zeros(topk, dtype=sp.uint64)
-        t_recall = sp.zeros(topk, dtype=sp.float64)
-        cnt = 0
-        for i in range(ans.shape[0]):
-            truth = get_in_tails(ans.indices[ans.indptr[i]:ans.indptr[i+1]], tails)
-            if not len(truth):
-                continue
-            t_preds = get_in_tails(preds.indices[preds.indptr[i]:preds.indptr[i + 1]][:topk], tails)
-            cnt += t_preds.shape[0]
-            matched = sp.isin(t_preds, truth)
-            cum_matched = sp.cumsum(matched, dtype=sp.uint64)
-            total_matched[:len(cum_matched)] += cum_matched
-            if len(cum_matched) != 0:
-                total_matched[len(cum_matched):] += cum_matched[-1]
-                t_recall[len(cum_matched):] += cum_matched[-1] / len(truth)
-        t_prec = total_matched / cnt / sp.arange(1, topk + 1)
-        t_recall = t_recall / cnt
-        return cls(prec=t_prec, recall=t_recall)
-
 
 
 class Transform(object):

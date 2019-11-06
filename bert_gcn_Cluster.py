@@ -249,8 +249,8 @@ class BertGCN_ClusterClassifier():
                     print('Recall:', np.round(recalls/eval_t, 4))
 
             # if epoch % 20 == 0:
-            # output_dir = '/mnt/sdb/yss/xbert_save_models/gcn_classifier/'+self.hypes.dataset+'/ep-'+str(epoch)+'/k-'+str(self.num_clusters)+'/'
-            output_dir = '../save_models/gcn_classifier/'+self.hypes.dataset+'/ep-'+str(epoch)+'/k-'+str(self.num_clusters)+'/'
+            output_dir = '/mnt/sdb/yss/xbert_save_models/gcn_classifier/'+self.hypes.dataset+'/ep-'+str(epoch)+'/k-'+str(self.num_clusters)+'/'
+            # output_dir = '../save_models/gcn_classifier/'+self.hypes.dataset+'/ep-'+str(epoch)+'/k-'+str(self.num_clusters)+'/'
             self.save(output_dir)
 
             val_inputs = np.array(val_X)
@@ -391,8 +391,8 @@ def main():
     if args.is_train:
         if ft:
             print('======================Start Fine-Tuning======================')
-            # model_path = '/mnt/sdb/yss/xbert_save_models/gcn_classifier/'+hypes.dataset+'/ep-'+str(ft_from)+'/k-'+str(num_clusters)+'/pytorch_model.bin'
-            model_path = '../save_models/gcn_clus_classifier/'+hypes.dataset+'/ep-' + str(ft_from) + '/k-' +  str(num_clusters) + '/pytorch_model.bin'
+            model_path = '/mnt/sdb/yss/xbert_save_models/gcn_classifier/'+hypes.dataset+'/ep-'+str(ft_from)+'/k-'+str(num_clusters)+'/pytorch_model.bin'
+            # model_path = '../save_models/gcn_clus_classifier/'+hypes.dataset+'/ep-' + str(ft_from) + '/k-' +  str(num_clusters) + '/pytorch_model.bin'
             bert.train(trn_X, trn_clus_Y, test_X, test_clus_Y, model_path, ft_from)
         else:
             print('======================Start Training======================')
