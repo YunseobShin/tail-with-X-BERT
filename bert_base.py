@@ -23,43 +23,18 @@ import xbert.data_utils as data_utils
 import xbert.rf_linear as rf_linear
 import xbert.rf_util as rf_util
 from Hyperparameters import Hyperparameters
-from GCN import GraphConvolution, gen_A, gen_adj
 
-class GraphUtil():
-    def __init__(self, Y, num_labels):
-        self.Y = Y
-        self.nums = np.zeros(num_labels)
-        self.adj = np.zeros([num_labels, num_labels])
-
-    def gen_graph(self):
-        for label_list in tqdm(self.Y):
-            for i in range(len(label_list)):
-                for j in range(i+1, len(label_list)):
-                    self.adj[label_list[i]][label_list[j]] += 1
-                    self.adj[label_list[j]][label_list[i]] += 1
-
-    def cal_degree(self):
-        self.nums = np.sum(self.adj, axis=1)
-
-class BertGCN(BertModel):
-    def __init__(self, config, ft, num_labels, res, H, device_num):
-        super(BertGCN, self).__init__(config)
+class BertBase(BertModel):
+    def __init__(self, config, ft, num_labels, device_num):
+        super(BertBase, self).__init__(config)
         self.device = torch.device('cuda:' + device_num)
         self.bert = BertModel.from_pretrained('bert-base-uncased')
         self.dropout = nn.Dropout(0.5)
-        self.H = get_tensor(H, self.device)
         self.ft = ft
         self.num_labels = num_labels
         self.FCN = nn.Linear(768, num_labels)
         self.softmax = nn.Softmax(dim=1)
         self.apply(self.init_bert_weights)
-        self.gcn_weight1 = Parameter(torch.Tensor(H.shape[1], 1500))
-        self.gcn_weight2 = Parameter(torch.Tensor(1500, 768))
-        self.lkrelu = nn.LeakyReLU(0.2)
-        self.A = torch.tensor(gen_A(num_labels, res)).float().to(self.device)
-        # self.A = Parameter(torch.from_numpy(gen_A(num_labels, res)).float()).to(self.device)
-        self.adj = gen_adj(self.A).detach()
-        # self.FCN2 = nn.Linear(num_labels, num_labels)
 
     def forward(self, input_ids, gcn_limit=False, token_type_ids=None, attention_mask=None):
         if self.ft:
@@ -67,27 +42,9 @@ class BertGCN(BertModel):
                 _, pooled_output = self.bert(input_ids, output_all_encoded_layers=False)
         else:
             _, pooled_output = self.bert(input_ids, output_all_encoded_layers=False)
-
         bert_logits = self.dropout(pooled_output)
-        skip = self.lkrelu(self.FCN(bert_logits))
-        adj = self.adj
-        # adj = gen_adj(self.A).detach()
-        x = torch.matmul(adj, self.dropout(torch.matmul(self.H, self.gcn_weight1)))
-        x = self.lkrelu(x)
-        x = torch.matmul(adj, torch.matmul(x, self.gcn_weight2))
-        x = self.lkrelu(x)
-        x = x.transpose(1, 0)
-        x = torch.matmul(bert_logits, x)
-        logits = x + skip
-        # logits = x
-        # logits = self.FCN2(logits)
+        logits = self.FCN(bert_logits)
         return self.softmax(logits)
-        # return logits
-
-    def get_bertout(self, input_ids):
-        with torch.no_grad():
-            _, pooled_output = self.bert(input_ids, output_all_encoded_layers=False)
-        return pooled_output
 
 def get_binary_vec(label_list, output_dim, divide=False):
     if divide:
@@ -123,43 +80,20 @@ def get_score(logits, truth, k=5):
 def get_tensor(M, dv):
     return torch.tensor(M).float().to(dv)
 
-class BertGCNClassifier():
-    def __init__(self, hypes, heads, t, device_num, ft, epochs, gutil, label_space, max_seq_len=512):
+class BertBaseClassifier():
+    def __init__(self, hypes, heads, t, device_num, ft, epochs, max_seq_len=512):
         self.max_seq_len = max_seq_len
         self.ds_path = '../datasets/' + hypes.dataset
         self.hypes = hypes
         self.epochs = epochs
         self.ft = ft
         self.t = t
-        self.H = label_space
         self.heads = heads
         self.tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-        self.criterion =  nn.MultiLabelSoftMarginLoss()
-        # self.criterion =  nn.BCELoss()
+        # self.criterion =  nn.MultiLabelSoftMarginLoss()
+        self.criterion =  nn.BCELoss()
         self.device = torch.device('cuda:' + device_num)
-        self.model = BertGCN.from_pretrained('bert-base-uncased', ft, len(heads), gutil, self.H, device_num)
-
-    def update_label_feature(self, X, Y, ep, output_dir):
-        feature_path = output_dir + 'L.BERT-head_'+str(self.t)+'-ep_'+str(ep)+'.npz'
-        self.model.eval()
-        self.model.to(self.device)
-        print('updating label fetures...')
-        all_input_ids = torch.tensor(X)
-
-        Y = get_binary_vec(Y, self.H.shape[0], divide=True).transpose() # m * n
-        outputs = np.zeros([Y.shape[0], 768])
-
-        sample_size = 20
-        for i in trange(Y.shape[0]):
-            y = Y[i].todense()
-            inds = np.where(y)[0]
-            inds = np.random.choice(inds, sample_size)
-            input_ids = all_input_ids[inds].to(self.device)
-            with torch.no_grad():
-                output = self.model.get_bertout(input_ids).cpu().detach().numpy()
-            outputs[i] = np.mean(output, axis=0)
-
-        return outputs
+        self.model = BertBase.from_pretrained('bert-base-uncased', ft, len(heads), device_num)
 
     def train(self, X, Y, val_X, val_Y, model_path=None, ft_from=0):
         if model_path: # fine tuning
@@ -169,7 +103,7 @@ class BertGCNClassifier():
             epohcs_range = range(1, self.epochs+1)
 
         all_input_ids = torch.tensor(X)
-        bs = 12
+        bs = 18
         self.model.train()
         self.model.to(self.device)
         total_run_time = 0.0
@@ -199,12 +133,10 @@ class BertGCNClassifier():
                 # if step % self.hypes.log_interval != 0:
                 #     continue
                 input_ids = all_input_ids[step*bs:(step+1)*bs].to(self.device)
-                labels = get_binary_vec(Y[step*bs:(step+1)*bs], self.H.shape[0])
+                labels = get_binary_vec(Y[step*bs:(step+1)*bs], len(self.heads))
                 labels = get_tensor(labels.toarray(), self.device)
                 c_pred = self.model(input_ids)
-                # print(c_pred.shape)
-                # print(labels.shape)
-                # exit()
+
                 loss = self.criterion(c_pred, labels)
 
                 tr_loss += loss.item()
@@ -230,16 +162,12 @@ class BertGCNClassifier():
                     print('Recall:', np.round(recalls/eval_t, 4))
 
             # if epoch % 20 == 0:
-            output_dir = '../save_models/gcn_classifier/'+self.hypes.dataset+'/t-'+str(self.t)+'_ep-'+str(epoch)+'/'
             val_inputs = np.array(val_X)
             val_labels = np.array(val_Y)
             acc = self.evaluate(val_inputs, val_labels)
             self.model.train()
-            if not self.ft:
-                self.model.H = get_tensor(self.update_label_feature(X, Y, epoch, output_dir), self.device)
+            output_dir = '/mnt/sdb/yss/xbert_save_models/base_classifier/'+self.hypes.dataset+'/t-'+str(self.t)+'_ep-'+str(epoch)+'/'
             self.save(output_dir)
-
-
 
 
     def evaluate(self, X, Y, model_path=''):
@@ -272,7 +200,7 @@ class BertGCNClassifier():
                 precisions += precision
                 recalls += recall
 
-        print('Test Precision:', np.round(precisions/eval_t, 4))
+        print('\nTest Precision:', np.round(precisions/eval_t, 4))
         print('Test Recall:', np.round(recalls/eval_t, 4))
 
     def get_bert_token(self, trn_text, only_CLS=False):
@@ -317,19 +245,6 @@ def load_data(X_path, head_X, bert):
 
     return X
 
-def load_label(ds_path):
-    label_space = smat.load_npz(ds_path+'/L.elmo.npz')
-    label_space = smat.lil_matrix(label_space)
-    label_path = ds_path+'/L.elmo_768.npy'
-    print('reducing dimensions in label space with t-SVD...')
-    if os.path.exists(label_path):
-        label_space = np.load(label_path)
-    else:
-        tsvd = TruncatedSVD(768)
-        label_space = tsvd.fit_transform(label_space)
-        np.save(label_path, label_space)
-    return label_space
-
 def main():
     parser = argparse.ArgumentParser(description='')
     parser.add_argument("-ds", "--dataset", default="AmazonCat-13K", type=str, required=True)
@@ -359,17 +274,7 @@ def main():
     with open(ds_path+'/mlc2seq/heads-'+str(head_threshold), 'rb') as g:
         heads = pkl.load(g)
 
-    label_space = load_label(ds_path)
-    label_space = label_space[:len(heads)]
-    # label_space = smat.load_npz(ds_path+'/L.elmo.npz')
-    # label_space = smat.lil_matrix(label_space)
-    # label_space = label_space[:len(heads)].toarray()
-
-    output_dim = len(heads)
-    gutil = GraphUtil(trn_head_Y, output_dim)
-    gutil.gen_graph()
-    gutil.cal_degree()
-    bert = BertGCNClassifier(hypes, heads, head_threshold, device_num, ft, args.epochs, gutil, label_space, max_seq_len=256)
+    bert = BertBaseClassifier(hypes, heads, head_threshold, device_num, ft, args.epochs, max_seq_len=256)
     trn_X_path = ds_path+'/head_data/trn_X-' + str(head_threshold)
     test_X_path = ds_path+'/head_data/test_X-' + str(head_threshold)
     trn_X = load_data(trn_X_path, trn_head_X, bert)
@@ -380,17 +285,17 @@ def main():
     if args.is_train:
         if ft:
             print('======================Start Fine-Tuning======================')
-            model_path = '../save_models/gcn_classifier/'+hypes.dataset+'/t-'+str(head_threshold)+'_ep-' + str(ft_from)+'/pytorch_model.bin'
+            model_path = '/mnt/sdb/yss/xbert_save_models/base_classifier/'+hypes.dataset+'/t-'+str(head_threshold)+'_ep-' + str(ft_from)+'/pytorch_model.bin'
             bert.train(trn_X, trn_head_Y, test_X, test_head_Y, model_path, ft_from)
         else:
             print('======================Start Training======================')
             bert.train(trn_X, trn_head_Y, test_X, test_head_Y)
         bert.evaluate(test_X, test_head_Y)
-        output_dir = '../save_models/gcn_classifier/'+hypes.dataset+'/t-'+str(head_threshold)+'_ep-' + str(args.epochs + ft_from)+'/'
+        output_dir = '/mnt/sdb/yss/xbert_save_models/base_classifier/'+hypes.dataset+'/t-'+str(head_threshold)+'_ep-' + str(args.epochs + ft_from)+'/'
         bert.save(output_dir)
 
     else:
-        model_path = '../save_models/gcn_classifier/'+args.dataset+'/t-'+str(head_threshold)+'_ep-'+str(ft_from)+'/pytorch_model.bin'
+        model_path = '/mnt/sdb/yss/xbert_save_models/base_classifier/'+args.dataset+'/t-'+str(head_threshold)+'_ep-'+str(ft_from)+'/pytorch_model.bin'
         print('======================Start Testing======================')
         bert.evaluate(test_X, test_head_Y, model_path)
 

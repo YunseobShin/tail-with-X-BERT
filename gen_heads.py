@@ -24,11 +24,15 @@ ds_path = '../datasets/' + args.dataset
 with open(ds_path + '/mlc2seq/label_vocab.txt', 'r') as fin:
     label_list = [line.strip().split('\t') for line in fin]
 
+q=1
 label_list = np.array(label_list)
 for i, label in tqdm(enumerate(label_list)):
     if int(label[0]) <= h:
         heads = range(0, i)
+        q=0
         break;
+if q==1:
+    heads = range(0, len(label_list))
 
 print(list(heads))
 with open(ds_path+'/mlc2seq/heads-'+str(h), 'wb') as g:

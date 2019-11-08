@@ -100,13 +100,12 @@ def get_tensor(M, dv):
     return torch.tensor(M).float().to(dv)
 
 class BertGCN_Cluster(BertModel):
-    def __init__(self, config, ft, num_labels, H, device_num, C, c_adj, alpha):
+    def __init__(self, config, ft, num_labels, H, device_num, C, c_adj):
         super(BertGCN_Cluster, self).__init__(config)
         self.device = torch.device('cuda:' + device_num)
         self.bert = BertModel.from_pretrained('bert-base-uncased')
         self.dropout = nn.Dropout(0.5)
         self.ft = ft
-        self.alpha = alpha
         self.H = get_tensor(H, self.device) # m * 3072
         self.C = get_tensor(C, self.device) # m * C
         self.c_adj = gen_adj(get_tensor(c_adj, self.device)).detach() # C * C
@@ -116,6 +115,7 @@ class BertGCN_Cluster(BertModel):
         self.actv = nn.LeakyReLU(0.2)
         # self.actv = nn.Tanh()
         self.softmax = nn.Softmax(dim=1)
+        self.sigmoid = nn.Sigmoid()
         self.apply(self.init_bert_weights)
 
         self.W1 = Parameter(torch.Tensor(H.shape[1], 768))
@@ -142,6 +142,7 @@ class BertGCN_Cluster(BertModel):
         logits = logits + skip
         # return logits
         return self.softmax(logits)
+        # return self.sigmoid(logits)
 
     def get_bertout(self, input_ids):
         with torch.no_grad():
@@ -180,12 +181,13 @@ def get_micro_score(logits, truth, k=5):
     return micro_precision, micro_recall
 
 class BertGCN_ClusterClassifier():
-    def __init__(self, hypes, device_num, ft, epochs, label_space, C, c_adj, alpha, max_seq_len=512):
+    def __init__(self, hypes, device_num, ft, epochs, label_space, C, c_adj, dlf=True, max_seq_len=512):
         self.max_seq_len = max_seq_len
         self.ds_path = '../datasets/' + hypes.dataset
         self.hypes = hypes
         self.epochs = epochs
         self.ft = ft
+        self.dlf = dlf
         self.num_clusters = c_adj.shape[0]
         self.H = label_space
         self.tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
@@ -193,7 +195,7 @@ class BertGCN_ClusterClassifier():
         self.criterion =  nn.BCELoss()
         self.device = torch.device('cuda:' + device_num)
         self.model = BertGCN_Cluster.from_pretrained('bert-base-uncased', \
-            ft, self.H.shape[0], self.H, device_num, C, c_adj, alpha)
+            ft, self.H.shape[0], self.H, device_num, C, c_adj)
 
     def update_label_feature(self, X, Y, ep, output_dir):
         feature_path = output_dir + 'L.BERT-ep_'+str(ep)+'.npz'
@@ -229,7 +231,7 @@ class BertGCN_ClusterClassifier():
         all_input_ids = torch.tensor(X)
         # all_Ys = get_binary_vec(Y, self.H.shape[0])
         # all_Ys = torch.tensor(all_Ys)
-        bs = 12
+        bs = 4
         self.model.train()
         self.model.to(self.device)
         total_run_time = 0.0
@@ -287,16 +289,16 @@ class BertGCN_ClusterClassifier():
                     print('Recall:', np.round(recalls/eval_t, 4))
 
             # if epoch % 20 == 0:
-            # output_dir = '/mnt/sdb/yss/xbert_save_models/gcn_dlf/'+self.hypes.dataset+'/ep-'+str(epoch)+'/k-'+str(self.num_clusters)+'/'
-            output_dir = '../save_models/gcn_dlf/'+self.hypes.dataset+'/ep-'+str(epoch)+'/k-'+str(self.num_clusters)+'/'
-            if not self.ft:
-                self.model.H = get_tensor(self.update_label_feature(X, Y, epoch, output_dir), self.device)
-            self.save(output_dir)
-
+            output_dir = '/mnt/sdb/yss/xbert_save_models/gcn_dlf/'+self.hypes.dataset+'/ep-'+str(epoch)+'/k-'+str(self.num_clusters)+'/'
+            # output_dir = '../save_models/gcn_dlf/'+self.hypes.dataset+'/ep-'+str(epoch)+'/k-'+str(self.num_clusters)+'/'
             val_inputs = np.array(val_X)
             val_labels = np.array(val_Y)
             acc = self.evaluate(val_inputs, val_labels)
             self.model.train()
+            if not self.ft:
+                if self.dlf:
+                    self.model.H = get_tensor(self.update_label_feature(X, Y, epoch, output_dir), self.device)
+            self.save(output_dir)
 
     def evaluate(self, X, Y, model_path=''):
         if model_path:
@@ -396,13 +398,13 @@ def main():
     parser.add_argument("-ft", "--fine_tune", default=0, type=int)
     parser.add_argument("-clu", "--clustering", default='spec', type=str)
     parser.add_argument("-from", "--ft_from", default=0, type=int)
-    parser.add_argument("-al", "--alpha", default=1.0, type=float)
+    parser.add_argument("-dlf", "--dlf", default=1, type=int)
     args = parser.parse_args()
 
     ft = (args.fine_tune == 1)
+    dlf = (args.dlf == 1)
     ft_from = args.ft_from
     num_clusters = args.k
-    alpha = args.alpha
     hypes = Hyperparameters(args.dataset)
     ds_path = '../datasets/' + args.dataset
     device_num = args.device_num
@@ -425,7 +427,7 @@ def main():
     # gutil.cal_degree()
     lc = LabelCluster(adj, num_clusters)
     # c_adj: k*k, C: m*k
-    print('partitioning labels with' + args.clustering + ' clustering...')
+    print('partitioning labels with ' + args.clustering + ' clustering...')
     clus_path = ds_path+'/clus_data/k-' + str(num_clusters)
     if args.clustering == 'kmeans':
         C, c_adj = lc.kmeans_clustering(trn_clus_Y, label_space, clus_path)
@@ -433,7 +435,7 @@ def main():
         C, c_adj = lc.spec_clustering(trn_clus_Y, clus_path)
     else:
         C, c_adj = lc.spec_clustering(trn_clus_Y, clus_path)
-    bert = BertGCN_ClusterClassifier(hypes, device_num, ft, args.epochs, label_space, C, c_adj, alpha, max_seq_len=256)
+    bert = BertGCN_ClusterClassifier(hypes, device_num, ft, args.epochs, label_space, C, c_adj, dlf, max_seq_len=512)
     trn_X_path = ds_path+'/clus_data/trn_X'
     test_X_path = ds_path+'/clus_data/test_X'
     trn_X = load_data(trn_X_path, trn_clus_X, bert)
@@ -444,21 +446,21 @@ def main():
     if args.is_train:
         if ft:
             print('======================Start Fine-Tuning======================')
-            # model_path = '/mnt/sdb/yss/xbert_save_models/gcn_dlf/'+hypes.dataset+'/ep-'+str(ft_from)+'/k-'+str(num_clusters)+'/pytorch_model.bin'
-            model_path = '../save_models/gcn_dlf/'+hypes.dataset+'/ep-' + str(ft_from) + '/k-' +  str(num_clusters) + '/pytorch_model.bin'
+            model_path = '/mnt/sdb/yss/xbert_save_models/gcn_dlf/'+hypes.dataset+'/ep-'+str(ft_from)+'/k-'+str(num_clusters)+'/pytorch_model.bin'
+            # model_path = '../save_models/gcn_dlf/'+hypes.dataset+'/ep-' + str(ft_from) + '/k-' +  str(num_clusters) + '/pytorch_model.bin'
             bert.train(trn_X, trn_clus_Y, test_X, test_clus_Y, model_path, ft_from)
         else:
             print('======================Start Training======================')
             bert.train(trn_X, trn_clus_Y, test_X, test_clus_Y)
         bert.evaluate(test_X, test_clus_Y)
-        # output_dir = '/mnt/sdb/yss/xbert_save_models/gcn_dlf/'+hypes.dataset+'/ep-' + str(args.epochs + ft_from) + '/k-' + str(num_clusters) + '/'
-        output_dir = '../save_models/gcn_dlf/'+hypes.dataset+'/ep-' + str(args.epochs + ft_from) + '/k-' + str(num_clusters) + '/'
+        output_dir = '/mnt/sdb/yss/xbert_save_models/gcn_dlf/'+hypes.dataset+'/ep-' + str(args.epochs + ft_from) + '/k-' + str(num_clusters) + '/'
+        # output_dir = '../save_models/gcn_dlf/'+hypes.dataset+'/ep-' + str(args.epochs + ft_from) + '/k-' + str(num_clusters) + '/'
         bert.save(output_dir)
 
     else:
         import datetime
-        model_path = '../save_models/gcn_dlf/'+hypes.dataset+'/ep-' + str(ft_from) + '/k-' +  str(num_clusters) + '/pytorch_model.bin'
-        # model_path = '/mnt/sdb/yss/xbert_save_models/gcn_dlf/'+hypes.dataset+'/ep-'+str(ft_from)+'/k-'+str(num_clusters)+'/pytorch_model.bin'
+        # model_path = '../save_models/gcn_dlf/'+hypes.dataset+'/ep-' + str(ft_from) + '/k-' +  str(num_clusters) + '/pytorch_model.bin'
+        model_path = '/mnt/sdb/yss/xbert_save_models/gcn_dlf/'+hypes.dataset+'/ep-'+str(ft_from)+'/k-'+str(num_clusters)+'/pytorch_model.bin'
         print('======================Start Testing======================')
         start = datetime.datetime.now()
         bert.evaluate(test_X, test_clus_Y, model_path)
