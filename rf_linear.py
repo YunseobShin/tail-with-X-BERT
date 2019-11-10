@@ -1014,5 +1014,5 @@ def test_svm(datafolder='dataset/Eurlex-4K', depth=3):
     print('|W|^2 = {}'.format((m.W.toarray() * m.W.toarray()).sum()))
 
 if __name__ == '__main__':
-    test_svm(datafolder='./datasets/Eurlex-4K', depth=6)
-    test_speed(datafolder='./datasets/Eurlex-4K', depth=6)
+    test_svm(datafolder='AmazonCat-13K', depth=6)
+    test_speed(datafolder='AmazonCat-13K', depth=6)

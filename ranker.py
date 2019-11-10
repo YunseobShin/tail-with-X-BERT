@@ -33,6 +33,7 @@ class LinearModel(object):
         return LinearModel(self.model + other.model, self.bias)
 
     def save(self, model_folder):
+        print(dir(model))
         self.model.save(model_folder)
 
     @classmethod

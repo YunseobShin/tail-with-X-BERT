@@ -111,11 +111,9 @@ class BertGCN_Cluster(BertModel):
         self.c_adj = gen_adj(get_tensor(c_adj, self.device)).detach() # C * C
         self.num_labels = num_labels
         self.FCN = nn.Linear(768, num_labels)
-        self.FCN_H = nn.Linear(H.shape[1], 768)
         self.actv = nn.LeakyReLU(0.2)
         # self.actv = nn.Tanh()
         self.softmax = nn.Softmax(dim=1)
-        self.sigmoid = nn.Sigmoid()
         self.apply(self.init_bert_weights)
 
         self.W1 = Parameter(torch.Tensor(H.shape[1], 768))
@@ -132,7 +130,6 @@ class BertGCN_Cluster(BertModel):
         skip = self.FCN(bert_logits) # bs * m
         HC = torch.matmul(self.C.transpose(1, 0), self.dropout(torch.matmul(self.H, self.W1)))
         HC = self.actv(HC)
-        H_skip = self.dropout(self.actv(self.FCN_H(self.H))) # m * 768
         HF = torch.matmul(self.c_adj, self.dropout(torch.matmul(HC, self.W2)))
         HF = self.actv(HF)
         HF = torch.matmul(self.C, HF) # m * 768
@@ -140,9 +137,7 @@ class BertGCN_Cluster(BertModel):
 
         logits = torch.matmul(bert_logits, HF) # bs * m
         logits = logits + skip
-        # return logits
         return self.softmax(logits)
-        # return self.sigmoid(logits)
 
     def get_bertout(self, input_ids):
         with torch.no_grad():
@@ -180,6 +175,9 @@ def get_micro_score(logits, truth, k=5):
         micro_recall[i] = num_corrects[i]/len(truth)
     return micro_precision, micro_recall
 
+def count_parameters(model):
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
 class BertGCN_ClusterClassifier():
     def __init__(self, hypes, device_num, ft, epochs, label_space, C, c_adj, dlf=True, max_seq_len=512):
         self.max_seq_len = max_seq_len
@@ -196,6 +194,8 @@ class BertGCN_ClusterClassifier():
         self.device = torch.device('cuda:' + device_num)
         self.model = BertGCN_Cluster.from_pretrained('bert-base-uncased', \
             ft, self.H.shape[0], self.H, device_num, C, c_adj)
+
+        print('# of trainable parameters:{:2f}M'.format(count_parameters(self.model)/1e+6))
 
     def update_label_feature(self, X, Y, ep, output_dir):
         feature_path = output_dir + 'L.BERT-ep_'+str(ep)+'.npz'
@@ -231,7 +231,7 @@ class BertGCN_ClusterClassifier():
         all_input_ids = torch.tensor(X)
         # all_Ys = get_binary_vec(Y, self.H.shape[0])
         # all_Ys = torch.tensor(all_Ys)
-        bs = 4
+        bs = 12
         self.model.train()
         self.model.to(self.device)
         total_run_time = 0.0
@@ -435,7 +435,7 @@ def main():
         C, c_adj = lc.spec_clustering(trn_clus_Y, clus_path)
     else:
         C, c_adj = lc.spec_clustering(trn_clus_Y, clus_path)
-    bert = BertGCN_ClusterClassifier(hypes, device_num, ft, args.epochs, label_space, C, c_adj, dlf, max_seq_len=512)
+    bert = BertGCN_ClusterClassifier(hypes, device_num, ft, args.epochs, label_space, C, c_adj, dlf, max_seq_len=256)
     trn_X_path = ds_path+'/clus_data/trn_X'
     test_X_path = ds_path+'/clus_data/test_X'
     trn_X = load_data(trn_X_path, trn_clus_X, bert)
